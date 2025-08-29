@@ -278,7 +278,7 @@ SCHEMAS = {
         "line_by_line":[{"line":"original line","explanation":"meaning","device_notes":"optional"}],
         "context_or_background":"poet/era/culture if relevant",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTVITIES := ACTIVITIES_BLOCK,
+        "activities": ACTVITIES,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": ["..."],
         "quote_bank": ["..."],
