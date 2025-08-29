@@ -22,7 +22,7 @@ except Exception:
 # =========================
 st.set_page_config(page_title="Suvichaar Literature Insight — Advanced", page_icon="📚", layout="centered")
 st.title("📚 Suvichaar — Literature Insight (Advanced)")
-st.caption("Upload/paste text → OCR → Auto-detect category → Deep, classroom-safe JSON with author, character sketches, themes, activities, rubrics, and more.")
+st.caption("Upload/paste text → OCR → Auto-detect category → Deep, classroom-safe JSON with author, character sketches, themes, activities, rubrics, emotional arc, Q&A, and more.")
 
 # =========================
 # SECRETS / CONFIG
@@ -192,7 +192,7 @@ def classify_with_gpt(txt: str, lang: str) -> str:
     return label if label in CATEGORIES else heuristic_guess_category(txt)
 
 # =========================
-# ADVANCED SCHEMAS (now with Summary/Hook/Why/Tips/Extensions)
+# ADVANCED SCHEMAS (added emotional arc + QA)
 # =========================
 BASE_SAFE_FIELDS = {
     "language": "en|hi",
@@ -206,12 +206,16 @@ BASE_SAFE_FIELDS = {
     "inspiration_hook": "an engaging hook/activity/analogy to spark curiosity",
     "why_it_matters": "how this text connects to life/history/skills",
     "study_tips": ["bullet study tips"],
-    "extension_reading": ["related readings, scenes, essays"]
+    "extension_reading": ["related readings, scenes, essays"],
+    # Emotional build + QA:
+    "emotional_arc": [{"beat":"setup|tension|turn|release","feeling":"word","evidence":"quote"}],
+    "questions_short": [{"q":"1-2 line question","a":"2-3 line answer"}],
+    "questions_long": [{"q":"analytical question","a":"5-8 line model answer with quotes"}]
 }
 
 ABOUT_AUTHOR = {
     "name": "if inferable",
-    "era_or_period": "e.g., Romantic, Modern, Bhakti, Progressive",
+    "era_or_period": "e.g., Elizabethan, Romantic, Modern, Bhakti, Progressive",
     "nationality_or_region": "if stated or inferable",
     "notable_works": ["..."],
     "themes_or_motifs": ["..."],
@@ -274,7 +278,7 @@ SCHEMAS = {
         "line_by_line":[{"line":"original line","explanation":"meaning","device_notes":"optional"}],
         "context_or_background":"poet/era/culture if relevant",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTIVITIES_BLOCK,
+        "activities": ACTVITIES := ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": ["..."],
         "quote_bank": ["..."],
@@ -427,12 +431,29 @@ SCHEMAS = {
     }
 }
 
-TEACHER_VIEW = TEACHER_VIEW  # keep as defined above
+# (minor fix for a walrus earlier)
+SCHEMAS["poetry"]["activities"] = ACTIVITIES_BLOCK
 
 def build_schema_prompt(category: str, language_code: str, detail: int, evidence_count: int, teacher_mode: bool) -> str:
+    """
+    Strongly instruct the model to provide MIN COUNTS using explicit requirements.
+    """
     schema = dict(SCHEMAS.get(category, SCHEMAS["story"]))  # copy
     if teacher_mode:
         schema["teacher_view"] = TEACHER_VIEW
+
+    hard_rules = f"""
+STRICT OUTPUT REQUIREMENTS (OBEY):
+- Provide AT LEAST {evidence_count} items in each of these (if relevant to the text): 
+  themes_detailed, quote_bank, questions_short, questions_long, emotional_arc,
+  activities.pre_reading, activities.during_reading, activities.post_reading,
+  teacher_view.discussion_questions, teacher_view.quick_assessment_mcq.
+- If the text cannot support {evidence_count}, create additional but plausible items that remain faithful to the text's content and tone.
+- Keep answers classroom-safe; quote evidence verbatim where asked.
+- Do not include explanations outside the JSON.
+- Ensure arrays exist (not a single object) when items are requested.
+"""
+
     return (
         "Return ONLY a JSON object (no prose). "
         "Keys in English; values in the target explanation language. "
@@ -442,8 +463,158 @@ def build_schema_prompt(category: str, language_code: str, detail: int, evidence
         f"Detail level (1-5): {detail}  — Higher = more bullet items and richer explanations.\n"
         f"Target evidence/examples per major section: ~{evidence_count}\n"
         "If a section does not apply to this text, omit that key entirely.\n"
-        "Schema:\n" + json.dumps(schema, ensure_ascii=False, indent=2)
+        + hard_rules +
+        "\nSchema:\n" + json.dumps(schema, ensure_ascii=False, indent=2)
     )
+
+# =========================
+# POST-PROCESSING NORMALIZER
+# =========================
+def _pad_list(lst, n, filler):
+    if not isinstance(lst, list):
+        lst = []
+    out = list(lst)
+    while len(out) < n:
+        out.append(filler(out[-1] if out else None, len(out)))
+    return out
+
+def _split_or_clone_quotes(item, target_len):
+    """Try to split long 'evidence'/'quote' strings into multiple items before cloning."""
+    if not item:
+        return []
+    text = ""
+    if isinstance(item, str):
+        text = item
+    elif isinstance(item, dict):
+        # find potential quote field
+        for k in ("evidence", "quote", "evidence_quotes"):
+            v = item.get(k)
+            if isinstance(v, str):
+                text = v
+                break
+            if isinstance(v, list) and v:
+                text = " ".join(v)
+                break
+    if not text or target_len <= 1:
+        return [item]
+    # split by sentence-ish boundaries
+    chunks = re.split(r"\s*(?:\|\||\|\.|[.;]\s+|\n)\s*", text)
+    chunks = [c.strip(" |") for c in chunks if c.strip()]
+    if len(chunks) >= target_len:
+        # rebuild items with single chunk
+        if isinstance(item, dict):
+            items = []
+            for c in chunks[:target_len]:
+                new = dict(item)
+                if "evidence_quotes" in new and isinstance(new["evidence_quotes"], list):
+                    new["evidence_quotes"] = [c]
+                elif "evidence" in new:
+                    new["evidence"] = c
+                elif "quote" in new:
+                    new["quote"] = c
+                items.append(new)
+            return items
+        else:
+            return chunks[:target_len]
+    return [item]
+
+def enforce_minimums(data: dict, n: int) -> dict:
+    """
+    Ensure at least n items exist for key arrays of interest.
+    Smartly pad by splitting long evidence strings; otherwise clone with a '(reinforced)' marker.
+    """
+    if not isinstance(data, dict):
+        return {}
+
+    def filler_quote(prev, idx):
+        if isinstance(prev, str):
+            return prev + " (reinforced)"
+        return (prev or "—")
+
+    def filler_theme(prev, idx):
+        base = {"theme": f"Theme {idx+1}", "explanation": "Reinforced insight.", "evidence_quotes": []}
+        if isinstance(prev, dict):
+            p = dict(prev)
+            # mark reinforced
+            p["explanation"] = (p.get("explanation","") + " (reinforced)").strip()
+            return p
+        return base
+
+    # themes_detailed
+    themes = data.get("themes_detailed")
+    if isinstance(themes, list) and themes:
+        expanded = []
+        for t in themes:
+            # attempt to split evidence to reach n before padding
+            items = _split_or_clone_quotes(t, n)
+            expanded.extend(items)
+        if len(expanded) < n:
+            expanded = _pad_list(expanded, n, filler_theme)
+        data["themes_detailed"] = expanded[:max(n, len(expanded))]
+    elif themes is not None:
+        data["themes_detailed"] = _pad_list([], n, filler_theme)
+
+    # quote_bank
+    if "quote_bank" in data:
+        qb = data.get("quote_bank")
+        if isinstance(qb, list) and qb:
+            expanded = []
+            for q in qb:
+                expanded.extend(_split_or_clone_quotes(q, n))
+            if len(expanded) < n:
+                expanded = _pad_list(expanded, n, filler_quote)
+            data["quote_bank"] = expanded[:max(n, len(expanded))]
+        else:
+            data["quote_bank"] = _pad_list([], n, filler_quote)
+
+    # emotional_arc
+    if "emotional_arc" in data:
+        ea = data.get("emotional_arc")
+        def filler_arc(prev, idx):
+            beats = ["setup","tension","turn","release","afterglow"]
+            return {"beat": beats[idx % len(beats)], "feeling":"reflective", "evidence":"(reinforced)"}
+        data["emotional_arc"] = _pad_list(ea if isinstance(ea, list) else [], n, filler_arc)
+
+    # QAs
+    for key, short in (("questions_short", True), ("questions_long", False)):
+        def filler_qa(prev, idx, long=not short):
+            return {
+                "q": f"Additional {'analytical ' if long else ''}question {idx+1}",
+                "a": ("A thoughtful, evidence-based answer (reinforced)." if long
+                      else "A concise answer with a brief quote (reinforced).")
+            }
+        arr = data.get(key)
+        data[key] = _pad_list(arr if isinstance(arr, list) else [], n, lambda p, i: filler_qa(p, i))
+
+    # activities
+    if "activities" in data and isinstance(data["activities"], dict):
+        for sect in ["pre_reading","during_reading","post_reading"]:
+            def filler_act(prev, idx, tag=sect):
+                base = {"title": f"Extra {tag.replace('_',' ').title()} {idx+1}", "steps":["Add one more step."], "duration_min": 8}
+                if tag == "during_reading":
+                    base["strategy"] = "annotation"
+                if tag == "post_reading":
+                    base["outcome"] = "reflection"
+                return base
+            arr = data["activities"].get(sect)
+            data["activities"][sect] = _pad_list(arr if isinstance(arr, list) else [], n, lambda p,i: filler_act(p,i))
+
+    # teacher_view
+    if "teacher_view" in data and isinstance(data["teacher_view"], dict):
+        def pad_simple_list(name):
+            arr = data["teacher_view"].get(name)
+            def filler(prev, idx):
+                return f"Additional {name.replace('_',' ')} {idx+1} (reinforced)"
+            data["teacher_view"][name] = _pad_list(arr if isinstance(arr, list) else [], n, filler)
+
+        pad_simple_list("discussion_questions")
+
+        mcq = data["teacher_view"].get("quick_assessment_mcq")
+        def filler_mcq(prev, idx):
+            return {"q": f"Extra MCQ {idx+1}", "choices": ["A","B","C","D"], "answer":"A"}
+        data["teacher_view"]["quick_assessment_mcq"] = _pad_list(mcq if isinstance(mcq, list) else [], n, lambda p,i: filler_mcq(p,i))
+
+    return data
 
 # =========================
 # SMALL RENDER HELPERS
@@ -477,7 +648,6 @@ def build_portable_html(data: dict, category: str) -> str:
         lis = "".join(f"<li>{esc(str(i))}</li>" for i in items)
         return f"<ul>{lis}</ul>"
 
-    # build sections (keep robust if keys missing)
     summary = esc(data.get("executive_summary") or data.get("one_sentence_takeaway") or "")
     hook = esc(data.get("inspiration_hook") or "")
     why = esc(data.get("why_it_matters") or "")
@@ -494,7 +664,6 @@ def build_portable_html(data: dict, category: str) -> str:
     for t in themes:
         theme_rows += f"<tr><td>{esc(t.get('theme',''))}</td><td>{esc(t.get('explanation',''))}</td><td>{esc(' | '.join(t.get('evidence_quotes',[]) or []))}</td></tr>"
 
-    # Simple HTML template
     html = f"""
 <!doctype html><html><head>
 <meta charset="utf-8"/>
@@ -554,13 +723,13 @@ with cols_top[0]:
 with cols_top[1]:
     detail_level = st.slider("Detail level", 1, 5, 5, help="Controls depth & count of bullets/tables returned.")
 with cols_top[2]:
-    evidence_per_section = st.slider("Evidence/examples per section", 1, 6, 3)
+    evidence_per_section = st.slider("Evidence/examples per section", 1, 6, 5)
 with cols_top[3]:
     teacher_mode = st.toggle("Include Teacher View", value=True, help="Adds objectives, MCQs, and discussion set.")
 
 # Display toggles
 st.markdown("#### Display controls")
-dcols = st.columns(6)
+dcols = st.columns(7)
 with dcols[0]:
     show_author = st.toggle("Author", value=True)
 with dcols[1]:
@@ -573,7 +742,8 @@ with dcols[4]:
     show_activities = st.toggle("Activities", value=True)
 with dcols[5]:
     show_rubric = st.toggle("Rubric", value=True)
-show_quotes = st.toggle("Quote Bank", value=True)
+with dcols[6]:
+    show_quotes = st.toggle("Quote Bank", value=True)
 
 run = st.button("🔎 Analyze (Advanced)")
 
@@ -626,7 +796,7 @@ if run:
     with st.spinner("Calling GPT-4o for advanced structured analysis…"):
         ok, content = call_azure_chat(
             [{"role":"system","content":system_msg},{"role":"user","content":user_msg}],
-            temperature=0.18 if detail_level >= 4 else 0.12,
+            temperature=0.2 if detail_level >= 4 else 0.12,
             max_tokens=3200,
             force_json=True
         )
@@ -635,7 +805,7 @@ if run:
         st.warning("⚠️ Sensitive content detected. Retrying in tighter student-safe mode…")
         ok, content = call_azure_chat(
             [{"role":"system","content":"You are a cautious school literature teacher. Avoid explicit terms; use neutral wording."},
-             {"role":"user","content":f"Return JSON for category '{cat}' with detail level {detail_level} and ~{evidence_per_section} evidences per section in language {explain_lang}. Text:\n{safe_text}"}],
+             {"role":"user","content":f"Return JSON for category '{cat}' with detail level {detail_level} and AT LEAST {evidence_per_section} items per section in language {explain_lang}. Text:\n{safe_text}"}],
             temperature=0.0, max_tokens=2800, force_json=True
         )
 
@@ -648,9 +818,12 @@ if run:
         st.error("Model did not return valid JSON.")
         st.stop()
 
+    # Enforce minimum counts locally so the UI matches the slider intent.
+    data = enforce_minimums(data, evidence_per_section)
+
     # ============= PRESENTATION LAYOUT =============
     st.markdown("---")
-    tabs = st.tabs(["Overview", "Text Insights", "Author & Characters", "Themes & Quotes", "Activities & Rubrics", "Teacher View", "Export / JSON"])
+    tabs = st.tabs(["Overview", "Text Insights", "Author & Characters", "Themes & Quotes", "Activities & Rubrics", "Q&A + Emotional Arc", "Teacher View", "Export / JSON"])
 
     # ----- Overview -----
     with tabs[0]:
@@ -787,7 +960,7 @@ if run:
                         if "steps" in item:
                             for i, sstep in enumerate(item["steps"], start=1):
                                 st.write(f"  {i}. {sstep}")
-                        for k in ("duration_min","strategy","type","deliverable","criteria"):
+                        for k in ("duration_min","strategy","type","deliverable","criteria","outcome","prompt"):
                             if item.get(k):
                                 st.caption(f"{k}: {item[k]}")
         if show_rubric and data.get("assessment_rubric"):
@@ -801,8 +974,20 @@ if run:
             h2("Misconceptions to avoid", "⚠️")
             st.write("\n".join(f"• {m}" for m in data["misconceptions"]))
 
-    # ----- Teacher View -----
+    # ----- Q&A + Emotional Arc -----
     with tabs[5]:
+        if data.get("emotional_arc"):
+            h2("Emotional Arc (Build & Release)", "💓")
+            st.table(data["emotional_arc"])
+        if data.get("questions_short"):
+            h2("Short Questions & Answers", "❔")
+            st.table(data["questions_short"])
+        if data.get("questions_long"):
+            h2("Long Questions (Analytical) & Model Answers", "🧩")
+            st.table(data["questions_long"])
+
+    # ----- Teacher View -----
+    with tabs[6]:
         if teacher_mode and data.get("teacher_view"):
             tv = data["teacher_view"]
             h2("Learning Objectives", "🎓")
@@ -818,7 +1003,7 @@ if run:
             st.info("Teacher View is disabled or not available in response.")
 
     # ----- Export / JSON -----
-    with tabs[6]:
+    with tabs[7]:
         h2("Download HTML snapshot", "⬇️")
         html_str = build_portable_html(data, cat)
         st.download_button(
