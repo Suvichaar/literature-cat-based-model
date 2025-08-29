@@ -20,9 +20,9 @@ except Exception:
 # =========================
 # PAGE CONFIG
 # =========================
-st.set_page_config(page_title="Suvichaar Literature Insight", page_icon="📚", layout="centered")
-st.title("📚 Suvichaar — Literature Insight (Text & Poetry & More)")
-st.caption("Upload a quote/poem/story/play image or paste text → OCR → Auto-detect category → Return classroom-safe, structured JSON.")
+st.set_page_config(page_title="Suvichaar Literature Insight (Detailed)", page_icon="📚", layout="centered")
+st.title("📚 Suvichaar — Literature Insight (Detailed)")
+st.caption("Upload a quote/poem/story/play image or paste text → OCR → Auto-detect category → Detailed, classroom-safe JSON.")
 
 # =========================
 # SECRETS / CONFIG
@@ -70,7 +70,7 @@ def make_classroom_safe(text: str) -> str:
 # =========================
 # AZURE GPT CALL
 # =========================
-def call_azure_chat(messages, *, temperature=0.1, max_tokens=2200, force_json=False):
+def call_azure_chat(messages, *, temperature=0.1, max_tokens=2600, force_json=False):
     headers = {"Content-Type": "application/json", "api-key": AZURE_API_KEY}
     url = f"{AZURE_ENDPOINT.rstrip('/')}/openai/deployments/{AZURE_DEPLOYMENT}/chat/completions"
     params = {"api-version": AZURE_API_VERSION}
@@ -87,6 +87,18 @@ def call_azure_chat(messages, *, temperature=0.1, max_tokens=2200, force_json=Fa
         return False, f"Azure error {r.status_code}: {r.text[:300]}"
     except Exception as e:
         return False, f"Azure request failed: {e}"
+
+def robust_parse(s: str):
+    try:
+        return json.loads(s)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", s)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+        return None
 
 # =========================
 # OCR (IMAGES / PDFs)
@@ -176,12 +188,11 @@ def classify_with_gpt(txt: str, lang: str) -> str:
     if not ok:
         return heuristic_guess_category(txt)
     label = out.strip().lower()
-    # clean
     label = re.sub(r'[^a-z_]', '', label)
     return label if label in CATEGORIES else heuristic_guess_category(txt)
 
 # =========================
-# CATEGORY → SCHEMA
+# DETAILED SCHEMAS
 # =========================
 BASE_SAFE_FIELDS = {
     "language": "en|hi",
@@ -195,11 +206,17 @@ BASE_SAFE_FIELDS = {
 SCHEMAS = {
     "poetry": {
         **BASE_SAFE_FIELDS,
+        "speaker_or_voice": "who speaks / perspective",
+        "structure_overview": {"stanzas": "count", "approx_line_count": "number", "rhyme_scheme": "e.g., ABAB", "meter_or_rhythm": "if notable"},
         "devices": [
-            {"name":"Simile|Metaphor|Personification|Alliteration|Hyperbole|Imagery|Rhyme|Rhythm",
+            {"name":"Simile|Metaphor|Personification|Alliteration|Assonance|Consonance|Imagery|Symbolism|Hyperbole|Enjambment|Rhyme",
              "evidence":"quoted words","explanation":"why it fits"}
         ],
-        "line_by_line":[{"line":"original line","explanation":"meaning"}],
+        "imagery_map":[{"sense":"visual|auditory|tactile|gustatory|olfactory","evidence":"quote","effect":"reader impact"}],
+        "symbol_table":[{"symbol":"...","meaning":"...","evidence":"..."}],
+        "line_by_line":[{"line":"original line","explanation":"meaning","device_notes":"optional"}],
+        "themes":["..."],
+        "context_or_background":"poet/era/culture if relevant",
         "vocabulary_glossary":[{"term":"...","meaning":"..."}],
         "misconceptions":["..."]
     },
@@ -207,65 +224,71 @@ SCHEMAS = {
         **BASE_SAFE_FIELDS,
         "characters":[{"name":"...","trait":"...","role":"protagonist/antagonist/support"}],
         "setting":"time/place",
-        "dialogue_beats":[{"speaker":"Name","line":"quoted dialogue","note":"function of line"}],
+        "conflict":"internal/external and description",
+        "dialogue_beats":[{"speaker":"Name","line":"quoted dialogue","note":"function of line (advance plot, reveal trait)"}],
         "stage_directions":"if any (short)",
         "themes":["..."]
     },
     "story": {
         **BASE_SAFE_FIELDS,
-        "plot_points":[{"stage":"exposition|rising|climax|falling|resolution","what_happens":"..."}],
-        "characters":[{"name":"...","trait":"..."}],
+        "narrative_voice":"first/third/omniscient/limited",
         "setting":"time/place",
-        "narrative_voice":"first/third etc.",
+        "characters":[{"name":"...","trait":"...","arc":"change or static"}],
+        "plot_points":[{"stage":"exposition|rising|climax|falling|resolution","what_happens":"...","evidence":"quote/line"}],
+        "conflict":"type + description",
         "themes":["..."],
         "moral_or_message":"if any"
     },
     "essay": {
         **BASE_SAFE_FIELDS,
         "thesis":"author's main claim",
-        "key_points":[{"point":"...", "evidence_or_example":"..."}],
+        "key_points":[{"point":"...", "evidence_or_example":"...", "counterpoint_if_any":"optional"}],
         "structure":"intro/body/conclusion notes",
-        "counterpoint_if_any":"optional"
+        "tone_register":"formal/informal/analytical",
+        "rhetorical_devices":[{"name":"analogy|contrast|examples|statistics","evidence":"..."}]
     },
     "biography": {
         **BASE_SAFE_FIELDS,
         "subject":"person",
-        "milestones":[{"year_or_age":"...", "event":"..."}],
+        "timeline":[{"year_or_age":"...", "event":"...", "impact":"..."}],
         "qualities":["..."],
-        "influence_or_impact":"..."
+        "influence_or_impact":"...",
+        "notable_works_or_contributions":["..."]
     },
     "autobiography": {
         **BASE_SAFE_FIELDS,
         "author":"person",
-        "episodes":[{"when":"...", "event":"...", "reflection":"..."}],
-        "lessons":["..."]
+        "episodes":[{"when":"...", "event":"...", "reflection":"...", "lesson":"..."}],
+        "themes":["..."],
+        "voice_and_style":"..."
     },
     "speech": {
         **BASE_SAFE_FIELDS,
         "audience":"who",
         "purpose":"inform/persuade/inspire",
-        "rhetorical_devices":[{"name":"repetition|anaphora|rhetorical_question|parallelism","evidence":"..."}],
         "key_points":["..."],
+        "rhetorical_devices":[{"name":"repetition|anaphora|rhetorical_question|parallelism|allusion","evidence":"...","effect":"..."}],
         "call_to_action":"if any"
     },
     "letter": {
         **BASE_SAFE_FIELDS,
         "letter_type":"formal|informal",
         "salutation":"...",
-        "body_points":["..."],
-        "closing":"..."
+        "body_points":[{"point":"...", "example_or_reason":"..."}],
+        "closing":"...",
+        "tone_register":"polite/warm/requesting/complaint"
     },
     "diary": {
         **BASE_SAFE_FIELDS,
         "date_or_time_hint":"if present",
-        "feelings":"emotion words",
         "events":["..."],
+        "feelings":"emotion words",
         "reflection":"what was learned"
     },
     "report": {
         **BASE_SAFE_FIELDS,
         "topic":"...",
-        "sections":[{"heading":"Introduction|Method|Observation|Conclusion","summary":"..."}],
+        "sections":[{"heading":"Introduction|Method|Observation|Discussion|Conclusion","summary":"..."}],
         "findings":["..."],
         "recommendations":["..."]
     },
@@ -274,6 +297,7 @@ SCHEMAS = {
         "characters":["..."],
         "setting":"...",
         "plot_outline":["..."],
+        "repeating_patterns_or_motifs":["..."],
         "moral_or_lesson":"..."
     },
     "myth": {
@@ -290,14 +314,27 @@ SCHEMAS = {
     }
 }
 
-def build_schema_prompt(category: str, language_code: str) -> str:
-    schema = SCHEMAS.get(category, SCHEMAS["story"])
+# Teacher view (optional extras)
+TEACHER_EXTRAS = {
+    "learning_objectives": ["..."],
+    "discussion_questions": ["..."],
+    "classroom_activity": [{"title":"...", "steps":["...", "..."], "duration_min": 10}],
+    "quick_assessment_mcq": [{"q":"...", "choices":["A","B","C","D"], "answer":"A"}]
+}
+
+def build_schema_prompt(category: str, language_code: str, detail: int, evidence_count: int, teacher_mode: bool) -> str:
+    schema = dict(SCHEMAS.get(category, SCHEMAS["story"]))  # copy
+    if teacher_mode:
+        schema["teacher_view"] = TEACHER_EXTRAS
     return (
         "Return ONLY a JSON object (no prose). "
         "Keys in English; values in the target explanation language. "
-        "Be concise, classroom-safe, quote evidence verbatim.\n\n"
+        "Be concise but **detailed** per the requested level; quote evidence verbatim.\n\n"
         f"Target language: {language_code}\n"
         f"Detected category: {category}\n"
+        f"Detail level (1-5): {detail}  — Higher = more items, richer explanations.\n"
+        f"Target evidence/examples per major section: ~{evidence_count}\n"
+        "When something is not present in the text, omit that key.\n"
         "Schema:\n" + json.dumps(schema, ensure_ascii=False, indent=2)
     )
 
@@ -305,14 +342,23 @@ def build_schema_prompt(category: str, language_code: str) -> str:
 # UI INPUTS
 # =========================
 st.markdown("### 📥 Input")
-text_input = st.text_area("Paste a poem/play/story/essay (optional)", height=140, placeholder="e.g., Your face is like Moon")
+text_input = st.text_area("Paste a poem/play/story/essay (optional)", height=160, placeholder="e.g., Your face is like Moon")
 files = st.file_uploader("Or upload an image/PDF containing the text", type=["jpg","jpeg","png","webp","tiff","pdf"], accept_multiple_files=False)
-lang_choice = st.selectbox("Target explanation language", ["Auto-detect","English","Hindi"], index=0)
+
+cols_top = st.columns(4)
+with cols_top[0]:
+    lang_choice = st.selectbox("Explanation language", ["Auto-detect","English","Hindi"], index=0)
+with cols_top[1]:
+    detail_level = st.slider("Detail level", 1, 5, 4, help="Controls depth & number of bullets/tables returned.")
+with cols_top[2]:
+    evidence_per_section = st.slider("Evidence/examples per section", 1, 6, 3)
+with cols_top[3]:
+    teacher_mode = st.toggle("Include Teacher View", value=True, help="Adds objectives, questions, activities, MCQs.")
 
 show_devices_table = st.toggle("Show devices table (if applicable)", value=True)
 show_line_by_line = st.toggle("Show line-by-line (for poetry/play)", value=True)
 
-run = st.button("🔎 Analyze")
+run = st.button("🔎 Analyze (Detailed)")
 
 # =========================
 # MAIN
@@ -355,38 +401,28 @@ if run:
         "Stick to evidence from the text."
         + (" Respond in Hindi." if explain_lang.startswith("hi") else " Respond in English.")
     )
-    user_msg = f"TEXT TO ANALYZE (verbatim):\n{safe_text}\n\n{build_schema_prompt(cat, explain_lang)}"
+    user_msg = f"TEXT TO ANALYZE (verbatim):\n{safe_text}\n\n{build_schema_prompt(cat, explain_lang, detail_level, evidence_per_section, teacher_mode)}"
 
-    with st.spinner("Calling GPT-4o for structured analysis…"):
+    with st.spinner("Calling GPT-4o for detailed structured analysis…"):
         ok, content = call_azure_chat(
             [{"role":"system","content":system_msg},{"role":"user","content":user_msg}],
-            temperature=0.1, max_tokens=2200, force_json=True
+            temperature=0.15 if detail_level >= 4 else 0.1,
+            max_tokens=3000,
+            force_json=True
         )
 
     if not ok and content == "FILTERED":
         st.warning("⚠️ Sensitive content detected. Retrying in tighter student-safe mode…")
         ok, content = call_azure_chat(
             [{"role":"system","content":"You are a cautious school literature teacher. Avoid explicit terms; use neutral wording."},
-             {"role":"user","content":f"Return JSON for category '{cat}' in language {explain_lang}. Text:\n{safe_text}"}],
-            temperature=0.0, max_tokens=1800, force_json=True
+             {"role":"user","content":f"Return JSON for category '{cat}' with detail level {detail_level} and ~{evidence_per_section} evidences per section in language {explain_lang}. Text:\n{safe_text}"}],
+            temperature=0.0, max_tokens=2600, force_json=True
         )
 
     if not ok:
         st.error(content)
         st.stop()
 
-    # Parse JSON
-    def robust_parse(s: str):
-        try:
-            return json.loads(s)
-        except Exception:
-            m = re.search(r"\{[\s\S]*\}", s)
-            if m:
-                try:
-                    return json.loads(m.group(0))
-                except Exception:
-                    return None
-            return None
     data = robust_parse(content) or {}
     if not isinstance(data, dict) or not data:
         st.error("Model did not return valid JSON.")
@@ -414,10 +450,22 @@ if run:
             for i, it in enumerate(data["line_by_line"], start=1):
                 st.markdown(f"**Line {i}:** {it.get('line','')}")
                 st.write(it.get("explanation",""))
+                dev = it.get("device_notes","")
+                if dev:
+                    st.caption(f"Device notes: {dev}")
                 st.divider()
         if show_devices_table and data.get("devices"):
             st.markdown("### 🎭 Devices")
             st.table([{"device":d.get("name",""),"evidence":d.get("evidence",""),"why":d.get("explanation","")} for d in data["devices"]])
+        if data.get("imagery_map"):
+            st.markdown("### 🌈 Imagery map")
+            st.table(data["imagery_map"])
+        if data.get("symbol_table"):
+            st.markdown("### 🔶 Symbols")
+            st.table(data["symbol_table"])
+        if data.get("structure_overview"):
+            st.markdown("### 🧩 Structure overview")
+            st.json(data["structure_overview"], expanded=False)
 
     if cat in ("play","story"):
         if data.get("characters"):
@@ -429,14 +477,52 @@ if run:
         if cat == "play" and show_line_by_line and data.get("dialogue_beats"):
             st.markdown("### 💬 Dialogue beats")
             st.table(data["dialogue_beats"])
+        if data.get("conflict"):
+            st.markdown("### ⚔️ Conflict")
+            st.write(data["conflict"])
+
+    if cat == "essay":
+        if data.get("thesis"):
+            st.markdown("### 🎯 Thesis")
+            st.write(data["thesis"])
+        if data.get("key_points"):
+            st.markdown("### 📌 Key points")
+            st.table(data["key_points"])
+        if data.get("rhetorical_devices"):
+            st.markdown("### ✨ Rhetorical devices")
+            st.table(data["rhetorical_devices"])
 
     # Shared extras
     if data.get("vocabulary_glossary"):
         st.markdown("### 📒 Glossary")
         st.table(data["vocabulary_glossary"])
+    if data.get("themes"):
+        st.markdown("### 🧠 Themes")
+        st.write("\n".join(f"• {t}" for t in data["themes"]))
     if data.get("misconceptions"):
         st.markdown("### ⚠️ Misconceptions to avoid")
         st.write("\n".join(f"• {m}" for m in data["misconceptions"]))
+
+    # Teacher view
+    if data.get("teacher_view"):
+        tv = data["teacher_view"]
+        st.markdown("## 🧑‍🏫 Teacher View")
+        if tv.get("learning_objectives"):
+            st.markdown("**Learning Objectives**")
+            st.write("\n".join(f"• {o}" for o in tv["learning_objectives"]))
+        if tv.get("discussion_questions"):
+            st.markdown("**Discussion Questions**")
+            st.write("\n".join(f"• {q}" for q in tv["discussion_questions"]))
+        if tv.get("classroom_activity"):
+            st.markdown("**Classroom Activity**")
+            for act in tv["classroom_activity"]:
+                st.markdown(f"- **{act.get('title','Activity')}** ({act.get('duration_min','?')} min)")
+                steps = act.get("steps") or []
+                for i, sstep in enumerate(steps, start=1):
+                    st.write(f"  {i}. {sstep}")
+        if tv.get("quick_assessment_mcq"):
+            st.markdown("**Quick Assessment (MCQ)**")
+            st.table(tv["quick_assessment_mcq"])
 
     # 4) Raw JSON download
     with st.expander("🔧 Debug / Raw JSON"):
