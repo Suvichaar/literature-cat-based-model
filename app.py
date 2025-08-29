@@ -22,7 +22,7 @@ except Exception:
 # =========================
 st.set_page_config(page_title="Suvichaar Literature Insight — Advanced", page_icon="📚", layout="centered")
 st.title("📚 Suvichaar — Literature Insight (Advanced)")
-st.caption("Upload/paste text → OCR → Auto-detect category → Deep, classroom-safe JSON: author, character sketches, activities, rubric, and more.")
+st.caption("Upload/paste text → OCR → Auto-detect category → Deep, classroom-safe JSON with author, character sketches, themes, activities, rubrics, and more.")
 
 # =========================
 # SECRETS / CONFIG
@@ -192,7 +192,7 @@ def classify_with_gpt(txt: str, lang: str) -> str:
     return label if label in CATEGORIES else heuristic_guess_category(txt)
 
 # =========================
-# ADVANCED SCHEMAS
+# ADVANCED SCHEMAS (now with Summary/Hook/Why/Tips/Extensions)
 # =========================
 BASE_SAFE_FIELDS = {
     "language": "en|hi",
@@ -200,7 +200,13 @@ BASE_SAFE_FIELDS = {
     "literal_meaning": "plain-language meaning",
     "figurative_meaning": "themes/symbolism if any",
     "tone_mood": "tone & mood words",
-    "one_sentence_takeaway": "classroom-safe summary"
+    "one_sentence_takeaway": "classroom-safe summary",
+    # NEW enrichment:
+    "executive_summary": "4–6 line high-level overview for students",
+    "inspiration_hook": "an engaging hook/activity/analogy to spark curiosity",
+    "why_it_matters": "how this text connects to life/history/skills",
+    "study_tips": ["bullet study tips"],
+    "extension_reading": ["related readings, scenes, essays"]
 }
 
 ABOUT_AUTHOR = {
@@ -421,7 +427,7 @@ SCHEMAS = {
     }
 }
 
-TEACHER_VIEW = TEACHER_VIEW  # reuse defined bundle
+TEACHER_VIEW = TEACHER_VIEW  # keep as defined above
 
 def build_schema_prompt(category: str, language_code: str, detail: int, evidence_count: int, teacher_mode: bool) -> str:
     schema = dict(SCHEMAS.get(category, SCHEMAS["story"]))  # copy
@@ -438,6 +444,102 @@ def build_schema_prompt(category: str, language_code: str, detail: int, evidence
         "If a section does not apply to this text, omit that key entirely.\n"
         "Schema:\n" + json.dumps(schema, ensure_ascii=False, indent=2)
     )
+
+# =========================
+# SMALL RENDER HELPERS
+# =========================
+def chip(text: str, color: str = "#2563eb"):
+    st.markdown(
+        f"""<span style="
+            display:inline-block;
+            padding:2px 10px;
+            margin-right:6px;
+            border-radius:999px;
+            background:{color};color:white;font-size:12px;">{text}</span>""",
+        unsafe_allow_html=True
+    )
+
+def h2(title: str, emoji: str = "🔹"):
+    st.markdown(f"### {emoji} {title}")
+
+def safe_join_bullets(items):
+    if not items:
+        return "—"
+    return "\n".join(f"• {x}" for x in items if isinstance(x, str) and x.strip())
+
+def build_portable_html(data: dict, category: str) -> str:
+    """Small portable HTML snapshot (no external CSS/JS)."""
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    def esc(x):
+        return (x or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+    def list_html(items):
+        if not items: return "<p>—</p>"
+        lis = "".join(f"<li>{esc(str(i))}</li>" for i in items)
+        return f"<ul>{lis}</ul>"
+
+    # build sections (keep robust if keys missing)
+    summary = esc(data.get("executive_summary") or data.get("one_sentence_takeaway") or "")
+    hook = esc(data.get("inspiration_hook") or "")
+    why = esc(data.get("why_it_matters") or "")
+    tips = data.get("study_tips") or []
+    ext = data.get("extension_reading") or []
+
+    author = data.get("about_author") or {}
+    quotes = data.get("quote_bank") or []
+    themes = data.get("themes_detailed") or []
+    activities = data.get("activities") or {}
+    rubric = data.get("assessment_rubric") or []
+
+    theme_rows = ""
+    for t in themes:
+        theme_rows += f"<tr><td>{esc(t.get('theme',''))}</td><td>{esc(t.get('explanation',''))}</td><td>{esc(' | '.join(t.get('evidence_quotes',[]) or []))}</td></tr>"
+
+    # Simple HTML template
+    html = f"""
+<!doctype html><html><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Literature Insight — {esc(category.title())}</title>
+<style>
+body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;line-height:1.5;margin:24px;color:#0f172a}}
+h1,h2,h3{{color:#0f172a;margin:0.4em 0}}
+.badge{{display:inline-block;padding:2px 10px;border-radius:999px;background:#2563eb;color:#fff;font-size:12px;margin-right:6px}}
+.card{{border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:12px 0;background:#fff}}
+table{{border-collapse:collapse;width:100%}}
+th,td{{border:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}}
+.small{{color:#475569;font-size:12px}}
+</style></head>
+<body>
+<h1>Literature Insight — {esc(category.title())}</h1>
+<div class="small">Generated: {ts}</div>
+
+<div class="card"><h2>Executive Summary</h2><p>{summary or '—'}</p></div>
+<div class="card"><h2>Inspiration Hook</h2><p>{hook or '—'}</p></div>
+<div class="card"><h2>Why It Matters</h2><p>{why or '—'}</p></div>
+
+<div class="card"><h2>Study Tips</h2>{list_html(tips)}</div>
+<div class="card"><h2>Extension Reading</h2>{list_html(ext)}</div>
+
+<div class="card"><h2>About the Author</h2>
+<p><b>Name:</b> {esc(author.get('name','—'))}</p>
+<p><b>Era/Period:</b> {esc(author.get('era_or_period','—'))}</p>
+<p><b>Region:</b> {esc(author.get('nationality_or_region','—'))}</p>
+<p><b>Style/Influence:</b> {esc(author.get('influences_or_style','—'))}</p>
+<p><b>Relevance:</b> {esc(author.get('relevance_to_text','—'))}</p>
+</div>
+
+<div class="card">
+<h2>Themes & Evidence</h2>
+<table><thead><tr><th>Theme</th><th>Explanation</th><th>Evidence</th></tr></thead>
+<tbody>{theme_rows or '<tr><td colspan="3">—</td></tr>'}</tbody></table>
+</div>
+
+<div class="card"><h2>Quote Bank</h2>{list_html(quotes)}</div>
+
+<div class="small">© Suvichaar Literature Insight</div>
+</body></html>
+"""
+    return html
 
 # =========================
 # UI INPUTS
@@ -457,13 +559,21 @@ with cols_top[3]:
     teacher_mode = st.toggle("Include Teacher View", value=True, help="Adds objectives, MCQs, and discussion set.")
 
 # Display toggles
-show_devices_table = st.toggle("Show devices table (if applicable)", value=True)
-show_line_by_line = st.toggle("Show line-by-line / dialogue beats", value=True)
-show_author = st.toggle("Show About the Author", value=True)
-show_characters = st.toggle("Show Character Sketches", value=True)
-show_activities = st.toggle("Show Activities & Projects", value=True)
-show_rubric = st.toggle("Show Assessment Rubric", value=True)
-show_quotes = st.toggle("Show Quote Bank", value=True)
+st.markdown("#### Display controls")
+dcols = st.columns(6)
+with dcols[0]:
+    show_author = st.toggle("Author", value=True)
+with dcols[1]:
+    show_characters = st.toggle("Characters", value=True)
+with dcols[2]:
+    show_line_by_line = st.toggle("Line/Beats", value=True)
+with dcols[3]:
+    show_devices_table = st.toggle("Devices", value=True)
+with dcols[4]:
+    show_activities = st.toggle("Activities", value=True)
+with dcols[5]:
+    show_rubric = st.toggle("Rubric", value=True)
+show_quotes = st.toggle("Quote Bank", value=True)
 
 run = st.button("🔎 Analyze (Advanced)")
 
@@ -493,12 +603,15 @@ if run:
     # Language
     detected = detect_hi_or_en(source_text)
     explain_lang = "en" if lang_choice == "English" else "hi" if lang_choice == "Hindi" else detected
-    st.info(f"Explanation language: **{explain_lang}** (detected from text: {detected})")
+
+    st.markdown("#### Detected")
+    chip(f"Language: {explain_lang}", "#0891b2")
+    st.write("")
 
     # 1) Category detection (heuristic + GPT)
     guessed = heuristic_guess_category(source_text)
     cat = classify_with_gpt(source_text, explain_lang) or guessed
-    st.success(f"📚 Detected category: **{cat}**")
+    chip(f"Category: {cat}", "#16a34a")
 
     # 2) Build category-specific prompt + call GPT-4o
     safe_text = make_classroom_safe(source_text)
@@ -535,162 +648,190 @@ if run:
         st.error("Model did not return valid JSON.")
         st.stop()
 
-    # 3) Display
-    st.markdown("### ✅ Analysis")
-    st.caption(f"Category: **{cat}**")
-    cols = st.columns(2)
-    with cols[0]:
-        st.markdown("**Literal meaning**")
-        st.write(data.get("literal_meaning","—"))
-        st.markdown("**Figurative meaning / themes**")
-        st.write(data.get("figurative_meaning","—"))
-    with cols[1]:
-        st.markdown("**Tone & Mood**")
-        st.write(data.get("tone_mood","—"))
-        st.markdown("**One-sentence takeaway**")
-        st.write(data.get("one_sentence_takeaway","—"))
+    # ============= PRESENTATION LAYOUT =============
+    st.markdown("---")
+    tabs = st.tabs(["Overview", "Text Insights", "Author & Characters", "Themes & Quotes", "Activities & Rubrics", "Teacher View", "Export / JSON"])
 
-    # About Author
-    if show_author and data.get("about_author"):
-        st.markdown("## ✍️ About the Author")
-        aa = data["about_author"]
-        st.json(aa, expanded=False)
+    # ----- Overview -----
+    with tabs[0]:
+        h2("Executive Summary", "🧭")
+        st.write(data.get("executive_summary") or data.get("one_sentence_takeaway") or "—")
 
-    # Character sketches
-    if show_characters and data.get("characters"):
-        st.markdown("## 👥 Character Sketches")
-        st.table([{
-            "name": c.get("name",""),
-            "role": c.get("role",""),
-            "traits": ", ".join(c.get("traits",[])) if isinstance(c.get("traits"), list) else c.get("traits",""),
-            "motives": ", ".join(c.get("motives",[])) if isinstance(c.get("motives"), list) else c.get("motives",""),
-            "arc": c.get("arc_or_change","")
-        } for c in data["characters"]])
-        # Key quotes per character (optional)
-        for c in data["characters"]:
-            if c.get("key_quotes"):
-                st.markdown(f"**Key quotes — {c.get('name','Character')}**")
-                st.write("\n".join(f"• {q.get('quote','')} — {q.get('explanation','')}" for q in c["key_quotes"]))
+        c1, c2 = st.columns(2)
+        with c1:
+            h2("Inspiration Hook", "✨")
+            st.write(data.get("inspiration_hook") or "—")
+        with c2:
+            h2("Why It Matters", "🎯")
+            st.write(data.get("why_it_matters") or "—")
 
-    # Category-specific sections
-    if cat == "poetry":
-        if show_line_by_line and data.get("line_by_line"):
-            st.markdown("### 📖 Line-by-line")
-            for i, it in enumerate(data["line_by_line"], start=1):
-                st.markdown(f"**Line {i}:** {it.get('line','')}")
-                st.write(it.get("explanation",""))
-                dev = it.get("device_notes","")
-                if dev:
-                    st.caption(f"Device notes: {dev}")
-                st.divider()
-        if show_devices_table and data.get("devices"):
-            st.markdown("### 🎭 Devices")
-            st.table([{"device":d.get("name",""),"evidence":d.get("evidence",""),"why":d.get("explanation","")} for d in data["devices"]])
-        if data.get("imagery_map"):
-            st.markdown("### 🌈 Imagery map")
-            st.table(data["imagery_map"])
-        if data.get("symbol_table"):
-            st.markdown("### 🔶 Symbols")
-            st.table(data["symbol_table"])
-        if data.get("structure_overview"):
-            st.markdown("### 🧩 Structure overview")
-            st.json(data["structure_overview"], expanded=False)
+        c3, c4 = st.columns(2)
+        with c3:
+            h2("Study Tips", "📝")
+            st.write(safe_join_bullets(data.get("study_tips")))
+        with c4:
+            h2("Extension Reading", "📚")
+            st.write(safe_join_bullets(data.get("extension_reading")))
 
-    if cat in ("play","story"):
-        if data.get("plot_points"):
-            st.markdown("### 🧭 Plot points")
-            st.table(data["plot_points"])
-        if cat == "play" and show_line_by_line and data.get("dialogue_beats"):
-            st.markdown("### 💬 Dialogue beats")
-            st.table(data["dialogue_beats"])
-        if data.get("conflict"):
-            st.markdown("### ⚔️ Conflict")
-            st.write(data["conflict"])
+    # ----- Text Insights -----
+    with tabs[1]:
+        lcol, rcol = st.columns(2)
+        with lcol:
+            h2("Literal meaning", "📘")
+            st.write(data.get("literal_meaning","—"))
+            h2("Figurative meaning / themes", "🌊")
+            st.write(data.get("figurative_meaning","—"))
+        with rcol:
+            h2("Tone & Mood", "🎼")
+            st.write(data.get("tone_mood","—"))
+            h2("One-sentence takeaway", "✅")
+            st.write(data.get("one_sentence_takeaway","—"))
 
-    if cat == "essay":
-        if data.get("thesis"):
-            st.markdown("### 🎯 Thesis")
-            st.write(data["thesis"])
-        if data.get("key_points"):
-            st.markdown("### 📌 Key points")
-            st.table(data["key_points"])
-        if data.get("rhetorical_devices"):
-            st.markdown("### ✨ Rhetorical devices")
-            st.table(data["rhetorical_devices"])
+        # Category-specific insights
+        if cat == "poetry":
+            if data.get("structure_overview"):
+                h2("Structure overview", "🧩")
+                st.json(data["structure_overview"], expanded=False)
+            if show_line_by_line and data.get("line_by_line"):
+                h2("Line-by-line", "📖")
+                for i, it in enumerate(data["line_by_line"], start=1):
+                    st.markdown(f"**Line {i}:** {it.get('line','')}")
+                    st.write(it.get("explanation",""))
+                    dev = it.get("device_notes","")
+                    if dev:
+                        st.caption(f"Device notes: {dev}")
+                    st.divider()
+            if show_devices_table and data.get("devices"):
+                h2("Devices", "🎭")
+                st.table([{"device":d.get("name",""),"evidence":d.get("evidence",""),"why":d.get("explanation","")} for d in data["devices"]])
+            if data.get("imagery_map"):
+                h2("Imagery map", "🌈")
+                st.table(data["imagery_map"])
+            if data.get("symbol_table"):
+                h2("Symbols", "🔶")
+                st.table(data["symbol_table"])
 
-    # Themes / Activities / Rubric / Quotes
-    if data.get("themes_detailed"):
-        st.markdown("## 🧠 Themes & Evidence")
-        st.table([{
-            "theme": t.get("theme",""),
-            "explanation": t.get("explanation",""),
-            "evidence": " | ".join(t.get("evidence_quotes",[])) if isinstance(t.get("evidence_quotes",[]), list) else t.get("evidence_quotes","")
-        } for t in data["themes_detailed"]])
+        if cat in ("play","story"):
+            if show_line_by_line and cat == "play" and data.get("dialogue_beats"):
+                h2("Dialogue beats", "💬")
+                st.table(data["dialogue_beats"])
+            if data.get("plot_points"):
+                h2("Plot points", "🧭")
+                st.table(data["plot_points"])
+            if data.get("conflict"):
+                h2("Conflict", "⚔️")
+                st.write(data["conflict"])
 
-    if show_activities and data.get("activities"):
-        st.markdown("## 🛠️ Activities & Projects")
-        acts = data["activities"]
-        for section in ["pre_reading","during_reading","post_reading","creative_tasks","projects"]:
-            if acts.get(section):
-                st.markdown(f"**{section.replace('_',' ').title()}**")
-                for item in acts[section]:
-                    st.markdown(f"- **{item.get('title','Activity')}**")
-                    if "steps" in item:
-                        for i, sstep in enumerate(item["steps"], start=1):
-                            st.write(f"  {i}. {sstep}")
-                    # optional extra fields
-                    for k in ("duration_min","strategy","type","deliverable","criteria"):
-                        if item.get(k):
-                            st.caption(f"{k}: {item[k]}")
+        if cat == "essay":
+            if data.get("thesis"):
+                h2("Thesis", "🎯")
+                st.write(data["thesis"])
+            if data.get("key_points"):
+                h2("Key points", "📌")
+                st.table(data["key_points"])
+            if data.get("rhetorical_devices"):
+                h2("Rhetorical devices", "✨")
+                st.table(data["rhetorical_devices"])
 
-    if show_rubric and data.get("assessment_rubric"):
-        st.markdown("## 🧪 Assessment Rubric")
-        st.json(data["assessment_rubric"], expanded=False)
+    # ----- Author & Characters -----
+    with tabs[2]:
+        if show_author and data.get("about_author"):
+            h2("About the Author", "✍️")
+            st.json(data["about_author"], expanded=False)
 
-    if show_quotes and data.get("quote_bank"):
-        st.markdown("## ❝ Quote Bank")
-        st.write("\n".join(f"• {q}" for q in data["quote_bank"]))
+        if show_characters and data.get("characters"):
+            h2("Character Sketches", "👥")
+            st.table([{
+                "name": c.get("name",""),
+                "role": c.get("role",""),
+                "traits": ", ".join(c.get("traits",[])) if isinstance(c.get("traits"), list) else c.get("traits",""),
+                "motives": ", ".join(c.get("motives",[])) if isinstance(c.get("motives"), list) else c.get("motives",""),
+                "arc": c.get("arc_or_change","")
+            } for c in data["characters"]])
+            for c in data["characters"]:
+                if c.get("key_quotes"):
+                    st.markdown(f"**Key quotes — {c.get('name','Character')}**")
+                    st.write("\n".join(f"• {q.get('quote','')} — {q.get('explanation','')}" for q in c["key_quotes"]))
 
-    if data.get("comparative_texts"):
-        st.markdown("### 🔁 Comparative Texts")
-        st.table(data["comparative_texts"])
+    # ----- Themes & Quotes -----
+    with tabs[3]:
+        if data.get("themes_detailed"):
+            h2("Themes & Evidence", "🧠")
+            st.table([{
+                "theme": t.get("theme",""),
+                "explanation": t.get("explanation",""),
+                "evidence": " | ".join(t.get("evidence_quotes",[])) if isinstance(t.get("evidence_quotes",[]), list) else t.get("evidence_quotes","")
+            } for t in data["themes_detailed"]])
+        if show_quotes and data.get("quote_bank"):
+            h2("Quote Bank", "❝")
+            st.write("\n".join(f"• {q}" for q in data["quote_bank"]))
+        if data.get("comparative_texts"):
+            h2("Comparative Texts", "🔁")
+            st.table(data["comparative_texts"])
+        if data.get("cross_curricular_links"):
+            h2("Cross-curricular Links", "🔗")
+            st.table(data["cross_curricular_links"])
+        if data.get("adaptation_ideas"):
+            h2("Adaptation Ideas", "🎬")
+            st.write("\n".join(f"• {a}" for a in data["adaptation_ideas"]))
 
-    if data.get("cross_curricular_links"):
-        st.markdown("### 🔗 Cross-curricular Links")
-        st.table(data["cross_curricular_links"])
+    # ----- Activities & Rubrics -----
+    with tabs[4]:
+        if show_activities and data.get("activities"):
+            acts = data["activities"]
+            for section in ["pre_reading","during_reading","post_reading","creative_tasks","projects"]:
+                if acts.get(section):
+                    h2(section.replace("_"," ").title(), "🛠️")
+                    for item in acts[section]:
+                        st.markdown(f"- **{item.get('title','Activity')}**")
+                        if "steps" in item:
+                            for i, sstep in enumerate(item["steps"], start=1):
+                                st.write(f"  {i}. {sstep}")
+                        for k in ("duration_min","strategy","type","deliverable","criteria"):
+                            if item.get(k):
+                                st.caption(f"{k}: {item[k]}")
+        if show_rubric and data.get("assessment_rubric"):
+            h2("Assessment Rubric", "🧪")
+            st.json(data["assessment_rubric"], expanded=False)
 
-    if data.get("adaptation_ideas"):
-        st.markdown("### 🎬 Adaptation Ideas")
-        st.write("\n".join(f"• {a}" for a in data["adaptation_ideas"]))
+        if data.get("vocabulary_glossary"):
+            h2("Glossary", "📒")
+            st.table(data["vocabulary_glossary"])
+        if data.get("misconceptions"):
+            h2("Misconceptions to avoid", "⚠️")
+            st.write("\n".join(f"• {m}" for m in data["misconceptions"]))
 
-    if data.get("vocabulary_glossary"):
-        st.markdown("### 📒 Glossary")
-        st.table(data["vocabulary_glossary"])
+    # ----- Teacher View -----
+    with tabs[5]:
+        if teacher_mode and data.get("teacher_view"):
+            tv = data["teacher_view"]
+            h2("Learning Objectives", "🎓")
+            st.write("\n".join(f"• {o}" for o in tv.get("learning_objectives", [])) or "—")
+            h2("Discussion Questions", "💡")
+            st.write("\n".join(f"• {q}" for q in tv.get("discussion_questions", [])) or "—")
+            h2("Quick Assessment (MCQ)", "📝")
+            if tv.get("quick_assessment_mcq"):
+                st.table(tv["quick_assessment_mcq"])
+            else:
+                st.write("—")
+        else:
+            st.info("Teacher View is disabled or not available in response.")
 
-    if data.get("misconceptions"):
-        st.markdown("### ⚠️ Misconceptions to avoid")
-        st.write("\n".join(f"• {m}" for m in data["misconceptions"]))
-
-    if teacher_mode and data.get("teacher_view"):
-        st.markdown("## 🧑‍🏫 Teacher View")
-        tv = data["teacher_view"]
-        if tv.get("learning_objectives"):
-            st.markdown("**Learning Objectives**")
-            st.write("\n".join(f"• {o}" for o in tv["learning_objectives"]))
-        if tv.get("discussion_questions"):
-            st.markdown("**Discussion Questions**")
-            st.write("\n".join(f"• {q}" for q in tv["discussion_questions"]))
-        if tv.get("quick_assessment_mcq"):
-            st.markdown("**Quick Assessment (MCQ)**")
-            st.table(tv["quick_assessment_mcq"])
-
-    # 4) Raw JSON download
-    with st.expander("🔧 Debug / Raw JSON"):
-        st.json(data, expanded=False)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # ----- Export / JSON -----
+    with tabs[6]:
+        h2("Download HTML snapshot", "⬇️")
+        html_str = build_portable_html(data, cat)
         st.download_button(
-            "⬇️ Download analysis JSON",
+            "Download portable HTML",
+            data=html_str.encode("utf-8"),
+            file_name=f"literature_{cat}_insight_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+            mime="text/html"
+        )
+        st.markdown("#### Raw JSON")
+        st.json(data, expanded=False)
+        st.download_button(
+            "Download JSON",
             data=json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
-            file_name=f"literature_{cat}_analysis_{ts}.json",
+            file_name=f"literature_{cat}_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
             mime="application/json",
         )
