@@ -2,7 +2,6 @@ import os
 import re
 import json
 from datetime import datetime
-from pathlib import Path
 from io import BytesIO
 
 import requests
@@ -218,7 +217,7 @@ def classify_with_gpt(txt: str, lang: str) -> str:
     return label if label in CATEGORIES else heuristic_guess_category(txt)
 
 # =========================
-# STUDY TEMPLATE GENERATOR (NEW)
+# STUDY TEMPLATE GENERATOR
 # =========================
 UNIVERSAL_SECTIONS = [
     "Title & Creator (Author/Poet/Speaker)",
@@ -263,8 +262,6 @@ def make_study_template(category: str) -> dict:
         tpl["extras"] = ["Topic", "Sections (Intro/Method/Observation/Discussion/Conclusion)", "Findings", "Recommendations"]
     elif cat in ("folk_tale", "myth", "legend"):
         tpl["extras"] = ["Characters", "Setting", "Plot Outline", "Motifs/Symbols", "Moral or Cultural Significance"]
-    else:
-        tpl["extras"] = []
 
     return tpl
 
@@ -354,26 +351,6 @@ SCHEMAS = {
         "context_or_background":"poet/era/culture if relevant",
         "about_author": ABOUT_AUTHOR,
         "activities": ACTIVITIES_BLOCK,
-    }
-}
-
-# fix accidental placeholder; rebuild SCHEMAS properly
-SCHEMAS = {
-    "poetry": {
-        **BASE_SAFE_FIELDS,
-        "speaker_or_voice": "who speaks / perspective",
-        "structure_overview": {"stanzas": "count", "approx_line_count": "number", "rhyme_scheme": "e.g., ABAB", "meter_or_rhythm": "if notable"},
-        "themes_detailed": THEME_BLOCK,
-        "devices": [
-            {"name":"Simile|Metaphor|Personification|Alliteration|Assonance|Consonance|Imagery|Symbolism|Hyperbole|Enjambment|Rhyme",
-             "evidence":"quoted words","explanation":"why it fits"}
-        ],
-        "imagery_map":[{"sense":"visual|auditory|tactile|gustatory|olfactory","evidence":"quote","effect":"reader impact"}],
-        "symbol_table":[{"symbol":"...","meaning":"...","evidence":"..."}],
-        "line_by_line":[{"line":"original line","explanation":"meaning","device_notes":"optional"}],
-        "context_or_background":"poet/era/culture if relevant",
-        "about_author": ABOUT_AUTHOR,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": ["..."],
         "quote_bank": ["..."],
@@ -392,7 +369,7 @@ SCHEMAS = {
         "stage_directions":"if any (short)",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": ["..."],
         "quote_bank": ["..."],
@@ -409,7 +386,7 @@ SCHEMAS = {
         "conflict":"type + description",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": ["..."],
         "quote_bank": ["..."],
@@ -426,7 +403,7 @@ SCHEMAS = {
         "rhetorical_devices":[{"name":"analogy|contrast|examples|statistics|allusion","evidence":"...","effect":"..."}],
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": ["..."],
         "quote_bank": ["..."]
@@ -440,7 +417,7 @@ SCHEMAS = {
         "notable_works_or_contributions":["..."],
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "autobiography": {
@@ -450,7 +427,7 @@ SCHEMAS = {
         "themes_detailed": THEME_BLOCK,
         "voice_and_style":"...",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "speech": {
@@ -462,7 +439,7 @@ SCHEMAS = {
         "call_to_action":"if any",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "letter": {
@@ -473,7 +450,7 @@ SCHEMAS = {
         "closing":"...",
         "tone_register":"polite/warm/requesting/complaint",
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "diary": {
@@ -483,7 +460,7 @@ SCHEMAS = {
         "feelings":"emotion words",
         "reflection":"what was learned",
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "report": {
@@ -492,7 +469,7 @@ SCHEMAS = {
         "sections":[{"heading":"Introduction|Method|Observation|Discussion|Conclusion","summary":"..."}],
         "findings":["..."],
         "recommendations":["..."],
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "folk_tale": {
@@ -503,7 +480,7 @@ SCHEMAS = {
         "repeating_patterns_or_motifs":["..."],
         "moral_or_lesson":"...",
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "myth": {
@@ -512,7 +489,7 @@ SCHEMAS = {
         "origin_or_explanation":"what it explains",
         "plot_outline":["..."],
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "legend": {
@@ -521,21 +498,10 @@ SCHEMAS = {
         "historical_backdrop":"...",
         "notable_events":["..."],
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTVITIES_BLOCK if 'ACTVITIES_BLOCK' in globals() else None,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     }
 }
-
-# alias fix
-ACTIVITIES_BLOCK = ACTVITIES_BLOCK = {
-    "pre_reading": [{"title":"...", "steps":["...","..."], "duration_min":10}],
-    "during_reading": [{"title":"...", "steps":["..."], "strategy":"think-pair-share|annotation|jigsaw"}],
-    "post_reading": [{"title":"...", "steps":["..."], "outcome":"reflection|poster|debate"}],
-    "creative_tasks": [{"title":"...", "type":"poem|skit|poster|diary|letter","prompt":"..."}],
-    "projects": [{"title":"...", "deliverable":"slide deck|poster|report|performance","criteria":["..."]}]
-}
-for _k in SCHEMAS:
-    SCHEMAS[_k]["activities"] = ACTIVITIES_BLOCK
 
 def build_schema_prompt(category: str, language_code: str, detail: int, evidence_count: int, teacher_mode: bool) -> str:
     """
@@ -543,11 +509,7 @@ def build_schema_prompt(category: str, language_code: str, detail: int, evidence
     """
     schema = dict(SCHEMAS.get(category, SCHEMAS["story"]))  # shallow copy
     if teacher_mode:
-        schema["teacher_view"] = {
-            "learning_objectives": ["..."],
-            "discussion_questions": ["..."],
-            "quick_assessment_mcq": [{"q":"...", "choices":["A","B","C","D"], "answer":"A"}]
-        }
+        schema["teacher_view"] = TEACHER_VIEW
 
     hard_rules = f"""
 STRICT OUTPUT REQUIREMENTS:
@@ -862,10 +824,10 @@ if run:
         cat = guessed
     chip(f"Category: {cat}", "#16a34a")
 
-    # 1b) Build deterministic STUDY TEMPLATE for this category (NEW)
+    # 1b) Build deterministic STUDY TEMPLATE for this category
     study_template = make_study_template(cat)
 
-    # 2) Build category-specific prompt + call GPT-4o to fill DATA
+    # 2) Build category-specific prompt + call Azure to fill DATA
     safe_text = make_classroom_safe(source_text)
     system_msg = (
         "You are a veteran literature teacher for school students. "
@@ -875,7 +837,7 @@ if run:
     )
     user_msg = f"TEXT TO ANALYZE (verbatim):\n{safe_text}\n\n{build_schema_prompt(cat, explain_lang, detail_level, evidence_per_section, teacher_mode)}"
 
-    with st.spinner("Calling GPT-4o for structured DATA…"):
+    with st.spinner("Calling Azure for structured DATA…"):
         ok, content = call_azure_chat(
             [{"role":"system","content":system_msg},{"role":"user","content":user_msg}],
             temperature=0.15 if detail_level >= 4 else 0.1,
@@ -898,7 +860,7 @@ if run:
     parsed = robust_parse(content)
     data = parsed.get("data") if isinstance(parsed, dict) else None
     if not isinstance(data, dict) or not data:
-        st.info("Model returned malformed JSON. Retrying with a minimal skeleton…")
+        st.info("The model returned malformed JSON. Retrying with a minimal skeleton…")
         ok2, content2 = call_azure_chat(
             [{"role":"system","content":system_msg},
              {"role":"user","content":f"Return ONLY JSON: {{\"data\": {{\"executive_summary\":\"...\",\"about_author\":{{}},\"themes_detailed\":[],\"quote_bank\":[]}}}} for a '{cat}' text (≤ {evidence_per_section} items per list). Text:\n{safe_text}"}],
@@ -918,7 +880,7 @@ if run:
     st.markdown("---")
     tabs = st.tabs(["Study Template", "Overview", "Text Insights", "Author & Characters", "Themes & Quotes", "Activities & Rubrics", "Q&A + Emotional Arc", "Teacher View", "Export / JSON"])
 
-    # ----- Study Template (NEW) -----
+    # ----- Study Template -----
     with tabs[0]:
         h2("Category-specific Study Template", "🧩")
         st.write(f"**Category:** {study_template['category'].title()}")
@@ -1095,7 +1057,7 @@ if run:
             h2("Learning Objectives", "🎓")
             st.write("\n".join(f"• {o}" for o in tv.get("learning_objectives", [])) or "—")
             h2("Discussion Questions", "💡")
-            st.write("\n".Join(f"• {q}" for q in tv.get("discussion_questions", [])) or "—")
+            st.write("\n".join(f"• {q}" for q in tv.get("discussion_questions", [])) or "—")
             h2("Quick Assessment (MCQ)", "📝")
             if tv.get("quick_assessment_mcq"):
                 st.table(tv["quick_assessment_mcq"])
