@@ -1,13 +1,21 @@
-import os
+# app.py
+# Suvichaar Literature Insight — Option B (Optimized)
+# ---------------------------------------------------
+# - Category detection (heuristic + Azure fallback)
+# - Category-specific study template (deterministic)
+# - Structured data generation via Azure OpenAI (JSON-only)
+# - Robust JSON repair + safe fallbacks
+# - Optional padding to reach evidence counts (off by default)
+# - Clean UI with clear sections
+
 import re
 import json
 from datetime import datetime
 
 import requests
-from PIL import Image
 import streamlit as st
 
-# --- Azure Doc Intelligence SDK (OCR) ---
+# --- Azure Doc Intelligence SDK (OCR) (optional) ---
 try:
     from azure.ai.documentintelligence import DocumentIntelligenceClient
     from azure.core.credentials import AzureKeyCredential
@@ -15,15 +23,17 @@ except Exception:
     DocumentIntelligenceClient = None
     AzureKeyCredential = None
 
+
 # =========================
 # PAGE CONFIG
 # =========================
 st.set_page_config(page_title="Suvichaar Literature Insight — Advanced", page_icon="📚", layout="centered")
 st.title("📚 Suvichaar — Literature Insight (Advanced)")
 st.caption(
-    "Upload/paste text → OCR → Auto-detect category → Category-specific STUDY TEMPLATE + classroom-safe JSON "
-    "(author, characters, themes, devices, activities, rubrics, Q&A, emotional arc)."
+    "Paste/upload text → Auto-detect category → Get a category-specific study template + classroom-safe, structured data "
+    "(summary, themes, devices, characters, emotional arc, Q&A, activities, rubric)."
 )
+
 
 # =========================
 # SECRETS / CONFIG
@@ -45,11 +55,12 @@ AZURE_DI_KEY      = get_secret("AZURE_DI_KEY")
 if not (AZURE_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT):
     st.warning("Add Azure OpenAI secrets in `.streamlit/secrets.toml` → AZURE_API_KEY, AZURE_ENDPOINT, AZURE_DEPLOYMENT.")
 
+
 # =========================
-# SAFE SANITIZATION WRAPPER
+# UTIL: CLASSROOM-SAFE SANITIZER
 # =========================
 def make_classroom_safe(text: str) -> str:
-    """Replace potentially sensitive words with classroom-friendly phrasing to reduce filter blocks."""
+    """Replace potentially sensitive words with gentler terms to reduce filtering issues."""
     replacements = {
         r"\bkill(ed|ing)?\b": "harm",
         r"\bmurder(ed|ing)?\b": "serious harm",
@@ -68,66 +79,63 @@ def make_classroom_safe(text: str) -> str:
         text = re.sub(pat, sub, text, flags=re.IGNORECASE)
     return text
 
+
 # =========================
-# AZURE GPT CALL
+# AZURE OPENAI CALLERS
 # =========================
-def call_azure_chat(messages, *, temperature=0.1, max_tokens=5500, force_json=False):
-    """Calls Azure OpenAI Chat Completions."""
+def call_azure_chat(messages, *, temperature=0.1, max_tokens=4800, force_json=False):
+    """Generic Azure Chat Completions call."""
     headers = {"Content-Type": "application/json", "api-key": AZURE_API_KEY}
     url = f"{AZURE_ENDPOINT.rstrip('/')}/openai/deployments/{AZURE_DEPLOYMENT}/chat/completions"
     params = {"api-version": AZURE_API_VERSION}
     body = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
     if force_json:
-        body["response_format"] = {"type": "json_object"}  # preview flag supports strict JSON output
+        # Uses the preview response_format that asks model to emit strict JSON
+        body["response_format"] = {"type": "json_object"}
 
     try:
         r = requests.post(url, headers=headers, params=params, json=body, timeout=120)
         if r.status_code == 200:
-            content = r.json()["choices"][0]["message"]["content"]
-            return True, content
-        # content filter hint
+            return True, r.json()["choices"][0]["message"]["content"]
         if r.status_code == 400 and "filtered" in r.text.lower():
             return False, "FILTERED"
-        return False, f"Azure error {r.status_code}: {r.text[:500]}"
+        return False, f"Azure error {r.status_code}: {r.text[:600]}"
     except Exception as e:
         return False, f"Azure request failed: {e}"
 
-def strip_code_fences(s: str) -> str:
-    s = re.sub(r"^```(?:json)?\s*", "", s.strip(), flags=re.IGNORECASE)
-    s = re.sub(r"\s*```$", "", s.strip())
-    return s
 
-def repair_json(s: str) -> str:
-    """Try to repair common JSON issues (smart quotes, trailing commas, wrapped prose)."""
-    if not s:
-        return s
-    s = strip_code_fences(s)
-    s = s.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
-    s = re.sub(r",(\s*[}\]])", r"\1", s)  # trailing commas
-    m = re.search(r"\{[\s\S]*\}", s)
-    if m:
-        s = m.group(0)
-    return s.strip()
-
-def robust_parse(s: str):
-    """Attempts normal parse → repaired parse → graceful failure with None."""
+def robust_json_parse(s: str):
+    """Try normal parse → repair → None."""
     if not s:
         return None
+    # 1) try direct
     try:
         return json.loads(s)
     except Exception:
         pass
+    # 2) repair
+    s2 = s.strip()
+    # strip code fences
+    s2 = re.sub(r"^```(?:json)?\s*", "", s2, flags=re.IGNORECASE)
+    s2 = re.sub(r"\s*```$", "", s2)
+    # smart quotes
+    s2 = s2.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+    # trailing commas
+    s2 = re.sub(r",(\s*[}\]])", r"\1", s2)
+    # extract first JSON object
+    m = re.search(r"\{[\s\S]*\}", s2)
+    if m:
+        s2 = m.group(0)
     try:
-        fixed = repair_json(s)
-        return json.loads(fixed)
+        return json.loads(s2)
     except Exception:
         return None
 
+
 # =========================
-# OCR (IMAGES / PDFs)
+# OCR (IMAGE/PDF) VIA AZURE DI (OPTIONAL)
 # =========================
 def ocr_read_any(bytes_blob: bytes) -> str:
-    """Use Azure DI 'prebuilt-read' to extract text from images or PDFs."""
     if DocumentIntelligenceClient is None or AzureKeyCredential is None:
         return ""
     if not (AZURE_DI_ENDPOINT and AZURE_DI_KEY):
@@ -143,9 +151,8 @@ def ocr_read_any(bytes_blob: bytes) -> str:
         if getattr(doc, "pages", None):
             for p in doc.pages:
                 lines = [ln.content for ln in getattr(p, "lines", []) or [] if getattr(ln, "content", None)]
-                page_txt = "\n".join(lines).strip()
-                if page_txt:
-                    parts.append(page_txt)
+                if lines:
+                    parts.append("\n".join(lines).strip())
         elif getattr(doc, "paragraphs", None):
             parts.append("\n".join(pp.content for pp in doc.paragraphs if getattr(pp, "content", None)))
         else:
@@ -156,8 +163,9 @@ def ocr_read_any(bytes_blob: bytes) -> str:
     except Exception:
         return ""
 
+
 # =========================
-# LANGUAGE DETECTION
+# LANGUAGE & CATEGORY
 # =========================
 def detect_hi_or_en(text: str) -> str:
     devanagari = sum(0x0900 <= ord(c) <= 0x097F for c in text)
@@ -167,9 +175,7 @@ def detect_hi_or_en(text: str) -> str:
         return "en"
     return "hi" if (devanagari / total) >= 0.25 else "en"
 
-# =========================
-# CATEGORY DETECTION
-# =========================
+
 CATEGORIES = [
     "poetry", "play", "story", "essay", "biography", "autobiography",
     "speech", "letter", "diary", "report", "folk_tale", "myth", "legend"
@@ -199,9 +205,10 @@ def heuristic_guess_category(txt: str) -> str:
         return "speech"
     if any(k in lower for k in ["report on", "submitted to", "findings", "method", "observation"]):
         return "report"
-    return "story"  # default
+    return "story"
 
-def classify_with_gpt(txt: str, lang: str) -> str:
+
+def classify_with_gpt(txt: str) -> str:
     """Ask Azure to classify; fall back to heuristic."""
     safe = make_classroom_safe(txt)
     sys = (
@@ -212,19 +219,19 @@ def classify_with_gpt(txt: str, lang: str) -> str:
     user = f"Text:\n{safe}\n\nLabel only."
     ok, out = call_azure_chat(
         [{"role": "system", "content": sys}, {"role": "user", "content": user}],
-        temperature=0.0, max_tokens=24, force_json=False
+        temperature=0.0, max_tokens=16, force_json=False
     )
     if not ok or not out:
         return heuristic_guess_category(txt)
-    label = out.strip().lower()
-    label = re.sub(r'[^a-z_]', '', label)
+    label = re.sub(r'[^a-z_]', '', out.strip().lower())
     return label if label in CATEGORIES else heuristic_guess_category(txt)
 
+
 # =========================
-# STUDY TEMPLATE GENERATOR
+# STUDY TEMPLATE (DETERMINISTIC)
 # =========================
 UNIVERSAL_SECTIONS = [
-    "Title & Creator (Author/Poet/Speaker)",
+    "Title & Creator",
     "Introduction / Context",
     "Central Idea / Gist",
     "Summary (section-wise)",
@@ -238,7 +245,6 @@ UNIVERSAL_SECTIONS = [
 ]
 
 def make_study_template(category: str) -> dict:
-    """Deterministic teacher template per category (no model)."""
     cat = category.lower()
     tpl = {"category": cat, "sections": list(UNIVERSAL_SECTIONS), "extras": []}
 
@@ -247,7 +253,7 @@ def make_study_template(category: str) -> dict:
         tpl["extras"] = ["Speaker/Voice", "Literary & Sound Devices", "Imagery & Symbolism", "Emotional Arc"]
     elif cat == "play":
         tpl["sections"].insert(3, "Scene/Act-wise Summary")
-        tpl["extras"] = ["Characters & Relationships", "Setting & Stage Directions", "Dialogue Beats", "Dramatic Devices (soliloquy, irony)", "Plot Points & Conflict"]
+        tpl["extras"] = ["Characters & Relationships", "Setting & Stage Directions", "Dialogue Beats", "Dramatic Devices", "Plot Points & Conflict"]
     elif cat == "story":
         tpl["extras"] = ["Narrative Voice", "Characters", "Setting", "Plot Points (exposition→resolution)", "Conflict"]
     elif cat == "essay":
@@ -266,11 +272,11 @@ def make_study_template(category: str) -> dict:
         tpl["extras"] = ["Topic", "Sections (Intro/Method/Observation/Discussion/Conclusion)", "Findings", "Recommendations"]
     elif cat in ("folk_tale", "myth", "legend"):
         tpl["extras"] = ["Characters", "Setting", "Plot Outline", "Motifs/Symbols", "Moral or Cultural Significance"]
-
     return tpl
 
+
 # =========================
-# CATEGORY SCHEMAS (DATA FILL)
+# CATEGORY SCHEMAS (for DATA generation)
 # =========================
 BASE_SAFE_FIELDS = {
     "language": "en|hi",
@@ -288,7 +294,6 @@ BASE_SAFE_FIELDS = {
     "questions_short": [{"q": "1-2 line question", "a": "2-3 line answer"}],
     "questions_long": [{"q": "analytical question", "a": "5-8 line model answer with quotes"}]
 }
-
 ABOUT_AUTHOR = {
     "name": "if inferable",
     "era_or_period": "e.g., Elizabethan, Romantic, Modern, Bhakti, Progressive",
@@ -298,7 +303,6 @@ ABOUT_AUTHOR = {
     "influences_or_style": "short note",
     "relevance_to_text": "how author context connects to text"
 }
-
 CHARACTER_SKETCH = [{
     "name": "...",
     "role": "protagonist/antagonist/support/narrator",
@@ -308,9 +312,7 @@ CHARACTER_SKETCH = [{
     "relationships": [{"with": "Name", "nature": "ally/rival/family", "note": "..."}],
     "key_quotes": [{"quote": "...", "explanation": "what it reveals"}]
 }]
-
 THEME_BLOCK = [{"theme": "...", "explanation": "...", "evidence_quotes": ["..."]}]
-
 ACTIVITIES_BLOCK = {
     "pre_reading": [{"title": "...", "steps": ["...", "..."], "duration_min": 10}],
     "during_reading": [{"title": "...", "steps": ["..."], "strategy": "think-pair-share|annotation|jigsaw"}],
@@ -318,17 +320,10 @@ ACTIVITIES_BLOCK = {
     "creative_tasks": [{"title": "...", "type": "poem|skit|poster|diary|letter", "prompt": "..."}],
     "projects": [{"title": "...", "deliverable": "slide deck|poster|report|performance", "criteria": ["..."]}]
 }
-
 ASSESSMENT_RUBRIC = [{
     "criterion": "theme understanding|textual evidence|language analysis|presentation",
-    "levels": {
-        "exemplary": "descriptor",
-        "proficient": "descriptor",
-        "developing": "descriptor",
-        "emerging": "descriptor"
-    }
+    "levels": {"exemplary": "descriptor", "proficient": "descriptor", "developing": "descriptor", "emerging": "descriptor"}
 }]
-
 TEACHER_VIEW = {
     "learning_objectives": ["..."],
     "discussion_questions": ["..."],
@@ -341,10 +336,7 @@ SCHEMAS = {
         "speaker_or_voice": "who speaks / perspective",
         "structure_overview": {"stanzas": "count", "approx_line_count": "number", "rhyme_scheme": "e.g., ABAB", "meter_or_rhythm": "if notable"},
         "themes_detailed": THEME_BLOCK,
-        "devices": [
-            {"name": "Simile|Metaphor|Personification|Alliteration|Assonance|Consonance|Imagery|Symbolism|Hyperbole|Enjambment|Rhyme",
-             "evidence": "quoted words", "explanation": "why it fits"}
-        ],
+        "devices": [{"name": "Simile|Metaphor|Personification|Alliteration|Assonance|Consonance|Imagery|Symbolism|Hyperbole|Enjambment|Rhyme", "evidence": "quoted words", "explanation": "why it fits"}],
         "imagery_map": [{"sense": "visual|auditory|tactile|gustatory|olfactory", "evidence": "quote", "effect": "reader impact"}],
         "symbol_table": [{"symbol": "...", "meaning": "...", "evidence": "..."}],
         "line_by_line": [{"line": "original line", "explanation": "meaning", "device_notes": "optional"}],
@@ -365,7 +357,7 @@ SCHEMAS = {
         "characters": CHARACTER_SKETCH,
         "setting": "time/place",
         "conflict": "internal/external and description",
-        "dialogue_beats": [{"speaker": "Name", "line": "quoted dialogue", "note": "function (advance plot, reveal trait)"}],
+        "dialogue_beats": [{"speaker": "Name", "line": "quoted dialogue", "note": "function"}],
         "stage_directions": "if any (short)",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
@@ -503,21 +495,31 @@ SCHEMAS = {
     }
 }
 
+
 def build_schema_prompt(category: str, language_code: str, detail: int, evidence_count: int, teacher_mode: bool) -> str:
-    """
-    Ask the model to fill ONLY the 'data' part; we generate the 'template' in-app.
-    """
-    schema = dict(SCHEMAS.get(category, SCHEMAS["story"]))  # shallow copy
+    """Prompt: ask for ONLY { "data": { ... } } following the schema."""
+    schema = dict(SCHEMAS.get(category, SCHEMAS["story"]))  # shallow copy is fine
     if teacher_mode:
-        schema["teacher_view"] = TEACHER_VIEW
+        schema["teacher_view"] = {
+            "learning_objectives": ["..."],
+            "discussion_questions": ["..."],
+            "quick_assessment_mcq": [{"q": "...", "choices": ["A", "B", "C", "D"], "answer": "A"}]
+        }
 
     hard_rules = f"""
 STRICT OUTPUT REQUIREMENTS:
 - Return ONLY a JSON object with a single top-level key: "data".
-- "data" MUST conform to the provided schema keys (omit sections that don't apply).
-- For each list/array, provide AT MOST {evidence_count} items (concise).
-- Do NOT invent placeholder items; if the text supports fewer, return fewer.
+- "data" must use the provided schema keys. Omit keys that do not apply to the text.
+- For each list/array, provide AT MOST {evidence_count} items. Keep entries concise.
+- Do NOT invent placeholder items. If the text supports fewer, return fewer.
 - Classroom-safe wording; quote evidence verbatim where asked.
+
+Emphasize detailed, specific content for:
+- "executive_summary": 6–9 sentences covering setting, characters, conflict/tension, and foreshadowing.
+- "inspiration_hook": 2–3 vivid lines, classroom-friendly.
+- "why_it_matters": 3–4 lines linking to craft (e.g., tension building), life skills, and reader empathy.
+- "study_tips": 5–7 concrete, actionable bullets.
+- "extension_reading": 4–6 curated items (mix: primary text, criticism, historical context).
 """
 
     return (
@@ -526,11 +528,12 @@ STRICT OUTPUT REQUIREMENTS:
         f"Target language: {language_code}\nCategory: {category}\n"
         f"Detail level: {detail} (richer but concise). Item budget per list: ≤ {evidence_count}\n"
         + hard_rules +
-        "\nSCHEMA (for the \"data\" object):\n" + json.dumps(schema, ensure_ascii=False, indent=2)
+        "\nSCHEMA for the 'data' object:\n" + json.dumps(schema, ensure_ascii=False, indent=2)
     )
 
+
 # =========================
-# POST-PROCESSING NORMALIZER
+# OPTIONAL: MINIMUM ENFORCER (only when user enables toggle)
 # =========================
 def _pad_list(lst, n, filler):
     if not isinstance(lst, list):
@@ -541,7 +544,7 @@ def _pad_list(lst, n, filler):
     return out
 
 def _split_or_clone_quotes(item, target_len):
-    """Try to split long 'evidence'/'quote' strings into multiple items before cloning."""
+    """Split multi-sentence evidence into multiple items before cloning."""
     if not item:
         return []
     text = ""
@@ -578,7 +581,7 @@ def _split_or_clone_quotes(item, target_len):
     return [item]
 
 def enforce_minimums(data: dict, n: int) -> dict:
-    """Optionally pad a few lists to n items. Use only if user enables the toggle."""
+    """Pad a few lists to n items (only if toggle is ON)."""
     if not isinstance(data, dict):
         return {}
 
@@ -670,8 +673,9 @@ def enforce_minimums(data: dict, n: int) -> dict:
 
     return data
 
+
 # =========================
-# SMALL RENDER HELPERS
+# UI HELPERS
 # =========================
 def chip(text: str, color: str = "#2563eb"):
     st.markdown(
@@ -693,7 +697,6 @@ def safe_join_bullets(items):
     return "\n".join(f"• {x}" for x in items if isinstance(x, str) and x.strip())
 
 def build_portable_html(data: dict, category: str) -> str:
-    """Small portable HTML snapshot (no external CSS/JS)."""
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     def esc(x):
         return (x or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -706,8 +709,6 @@ def build_portable_html(data: dict, category: str) -> str:
     hook = esc(data.get("inspiration_hook") or "")
     why = esc(data.get("why_it_matters") or "")
     tips = data.get("study_tips") or []
-    ext = data.get("extension_reading") or []
-
     author = data.get("about_author") or {}
     quotes = data.get("quote_bank") or []
     themes = data.get("themes_detailed") or []
@@ -734,8 +735,8 @@ th,td{{border:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}}
 <div class="small">Generated: {ts}</div>
 
 <div class="card"><h2>Executive Summary</h2><p>{summary or '—'}</p></div>
-<div class="card"><h2>Inspiration Hook</h2><p>{hook or '—'}</p></div>
-<div class="card"><h2>Why It Matters</h2><p>{why or '—'}</p></div>
+<div class="card"><h2>Inspiration Hook</h2><p>{esc(hook) or '—'}</p></div>
+<div class="card"><h2>Why It Matters</h2><p>{esc(why) or '—'}</p></div>
 
 <div class="card"><h2>Study Tips</h2>{list_html(tips)}</div>
 <div class="card"><h2>About the Author</h2>
@@ -752,11 +753,11 @@ th,td{{border:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}}
 </div>
 
 <div class="card"><h2>Quote Bank</h2>{list_html(quotes)}</div>
-
 <div class="small">© Suvichaar Literature Insight</div>
 </body></html>
 """
     return html
+
 
 # =========================
 # UI INPUTS
@@ -767,15 +768,15 @@ files = st.file_uploader("Or upload an image/PDF containing the text", type=["jp
 
 cols_top = st.columns(5)
 with cols_top[0]:
-    lang_choice = st.selectbox("Explanation language", ["Auto-detect","English","Hindi"], index=0)
+    lang_choice = st.selectbox("Explanation language", ["Auto-detect", "English", "Hindi"], index=0)
 with cols_top[1]:
-    detail_level = st.slider("Detail level", 1, 5, 5, help="Controls depth & count of bullets/tables returned.")
+    detail_level = st.slider("Detail level", 1, 5, 5, help="Higher → richer but concise output.")
 with cols_top[2]:
-    evidence_per_section = st.slider("Evidence/examples per section", 1, 6, 3)
+    evidence_per_section = st.slider("Evidence/examples per list", 1, 6, 4)
 with cols_top[3]:
     teacher_mode = st.toggle("Include Teacher View", value=True, help="Adds objectives, MCQs, and discussion set.")
 with cols_top[4]:
-    allow_padding = st.toggle("Auto-fill missing items", value=False, help="If on, app pads lists with generic items to reach the target count.")
+    allow_padding = st.toggle("Auto-fill missing items", value=False, help="ON pads lists to the target count; OFF keeps only model output.")
 
 # Display toggles
 st.markdown("#### Display controls")
@@ -796,6 +797,7 @@ with dcols[6]:
     show_quotes = st.toggle("Quote Bank", value=True)
 
 run = st.button("🔎 Analyze (Advanced)")
+
 
 # =========================
 # MAIN
@@ -823,23 +825,22 @@ if run:
     # Language
     detected = detect_hi_or_en(source_text)
     explain_lang = "en" if lang_choice == "English" else "hi" if lang_choice == "Hindi" else detected
-
     st.markdown("#### Detected")
     chip(f"Language: {explain_lang}", "#0891b2")
     st.write("")
 
-    # 1) Category detection (heuristic + GPT)
+    # Category detection
     guessed = heuristic_guess_category(source_text)
     try:
-        cat = classify_with_gpt(source_text, explain_lang) or guessed
+        cat = classify_with_gpt(source_text) or guessed
     except Exception:
         cat = guessed
     chip(f"Category: {cat}", "#16a34a")
 
-    # 1b) Build deterministic STUDY TEMPLATE for this category
+    # Study template (deterministic)
     study_template = make_study_template(cat)
 
-    # 2) Build category-specific prompt + call Azure to fill DATA
+    # Prompt & model call
     safe_text = make_classroom_safe(source_text)
     system_msg = (
         "You are a veteran literature teacher for school students. "
@@ -849,47 +850,51 @@ if run:
     )
     user_msg = f"TEXT TO ANALYZE (verbatim):\n{safe_text}\n\n{build_schema_prompt(cat, explain_lang, detail_level, evidence_per_section, teacher_mode)}"
 
-    with st.spinner("Calling Azure for structured DATA…"):
+    with st.spinner("Generating structured DATA via Azure…"):
         ok, content = call_azure_chat(
             [{"role": "system", "content": system_msg}, {"role": "user", "content": user_msg}],
             temperature=0.15 if detail_level >= 4 else 0.1,
-            max_tokens=5500,
+            max_tokens=4800,
             force_json=True
         )
 
     if not ok and content == "FILTERED":
-        st.warning("⚠️ Sensitive content detected. Retrying in tighter student-safe mode…")
+        st.warning("⚠️ Sensitive content detected. Retrying in safer mode…")
         ok, content = call_azure_chat(
-            [{"role": "system", "content": "You are a cautious school literature teacher. Avoid explicit terms; use neutral wording."},
-             {"role": "user", "content": f"Return ONLY JSON with a 'data' object for category '{cat}', detail {detail_level}, ≤ {evidence_per_section} items per list, language {explain_lang}. Text:\n{safe_text}"}],
-            temperature=0.0, max_tokens=5000, force_json=True
+            [
+                {"role": "system", "content": "You are a cautious literature teacher. Avoid explicit terms; use neutral wording."},
+                {"role": "user", "content": f"Return ONLY JSON with a 'data' object for category '{cat}', detail {detail_level}, ≤ {evidence_per_section} items per list, language {explain_lang}. Text:\n{safe_text}"}
+            ],
+            temperature=0.0, max_tokens=4400, force_json=True
         )
 
     if not ok:
         st.error(content)
         st.stop()
 
-    parsed = robust_parse(content)
+    parsed = robust_json_parse(content)
     data = parsed.get("data") if isinstance(parsed, dict) else None
+
     if not isinstance(data, dict) or not data:
         st.info("The model returned malformed JSON. Retrying with a minimal skeleton…")
         ok2, content2 = call_azure_chat(
-            [{"role": "system", "content": system_msg},
-             {"role": "user", "content": f"Return ONLY JSON: {{\"data\": {{\"executive_summary\":\"...\",\"about_author\":{{}},\"themes_detailed\":[],\"quote_bank\":[]}}}} for a '{cat}' text (≤ {evidence_per_section} items per list). Text:\n{safe_text}"}],
-            temperature=0.0, max_tokens=2000, force_json=True
+            [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": f"Return ONLY JSON: {{\"data\": {{\"executive_summary\":\"...\",\"about_author\":{{}},\"themes_detailed\":[],\"quote_bank\":[]}}}} for a '{cat}' text (≤ {evidence_per_section} items per list). Text:\n{safe_text}"}
+            ],
+            temperature=0.0, max_tokens=1200, force_json=True
         )
-        parsed2 = robust_parse(content2) if ok2 else None
+        parsed2 = robust_json_parse(content2) if ok2 else None
         data = parsed2.get("data") if isinstance(parsed2, dict) else None
 
     if not isinstance(data, dict) or not data:
         st.error("Model did not return valid JSON.")
         st.stop()
 
-    # Optional: Enforce minimum counts so the UI matches the slider intent.
     if allow_padding:
         data = enforce_minimums(data, evidence_per_section)
 
-    # ============= PRESENTATION LAYOUT =============
+    # ============= PRESENTATION =============
     st.markdown("---")
     tabs = st.tabs([
         "Study Template", "Overview", "Text Insights", "Author & Characters",
@@ -897,7 +902,7 @@ if run:
         "Teacher View", "Export / JSON"
     ])
 
-    # ----- Study Template -----
+    # Study Template
     with tabs[0]:
         h2("Category-specific Study Template", "🧩")
         st.write(f"**Category:** {study_template['category'].title()}")
@@ -907,7 +912,7 @@ if run:
             st.markdown("**Extras (focus for this category)**")
             st.write("\n".join(f"• {s}" for s in study_template["extras"]))
 
-    # ----- Overview -----
+    # Overview
     with tabs[1]:
         h2("Executive Summary", "🧭")
         st.write(data.get("executive_summary") or data.get("one_sentence_takeaway") or "—")
@@ -928,7 +933,7 @@ if run:
             h2("Extension Reading", "📚")
             st.write(safe_join_bullets(data.get("extension_reading")))
 
-    # ----- Text Insights -----
+    # Text Insights
     with tabs[2]:
         lcol, rcol = st.columns(2)
         with lcol:
@@ -957,7 +962,10 @@ if run:
                     st.divider()
             if show_devices_table and data.get("devices"):
                 h2("Devices", "🎭")
-                st.table([{"device": d.get("name", ""), "evidence": d.get("evidence", ""), "why": d.get("explanation", "")} for d in data["devices"]])
+                st.table([
+                    {"device": d.get("name", ""), "evidence": d.get("evidence", ""), "why": d.get("explanation", "")}
+                    for d in data["devices"]
+                ])
             if data.get("imagery_map"):
                 h2("Imagery map", "🌈")
                 st.table(data["imagery_map"])
@@ -987,7 +995,7 @@ if run:
                 h2("Rhetorical devices", "✨")
                 st.table(data["rhetorical_devices"])
 
-    # ----- Author & Characters -----
+    # Author & Characters
     with tabs[3]:
         if show_author and data.get("about_author"):
             h2("About the Author", "✍️")
@@ -1007,7 +1015,7 @@ if run:
                     st.markdown(f"**Key quotes — {c.get('name','Character')}**")
                     st.write("\n".join(f"• {q.get('quote','')} — {q.get('explanation','')}" for q in c["key_quotes"]))
 
-    # ----- Themes & Quotes -----
+    # Themes & Quotes
     with tabs[4]:
         if data.get("themes_detailed"):
             h2("Themes & Evidence", "🧠")
@@ -1029,7 +1037,7 @@ if run:
             h2("Adaptation Ideas", "🎬")
             st.write("\n".join(f"• {a}" for a in data["adaptation_ideas"]))
 
-    # ----- Activities & Rubrics -----
+    # Activities & Rubrics
     with tabs[5]:
         if show_activities and data.get("activities"):
             acts = data["activities"]
@@ -1055,7 +1063,7 @@ if run:
             h2("Misconceptions to avoid", "⚠️")
             st.write("\n".join(f"• {m}" for m in data["misconceptions"]))
 
-    # ----- Q&A + Emotional Arc -----
+    # Q&A + Emotional Arc
     with tabs[6]:
         if data.get("emotional_arc"):
             h2("Emotional Arc (Build & Release)", "💓")
@@ -1067,7 +1075,7 @@ if run:
             h2("Long Questions (Analytical) & Model Answers", "🧩")
             st.table(data["questions_long"])
 
-    # ----- Teacher View -----
+    # Teacher View
     with tabs[7]:
         if teacher_mode and data.get("teacher_view"):
             tv = data["teacher_view"]
@@ -1083,7 +1091,7 @@ if run:
         else:
             st.info("Teacher View is disabled or not available in response.")
 
-    # ----- Export / JSON -----
+    # Export / JSON
     with tabs[8]:
         h2("Download HTML snapshot", "⬇️")
         html_str = build_portable_html(data, cat)
@@ -1094,7 +1102,7 @@ if run:
             mime="text/html"
         )
         bundle = {"category": cat, "template": study_template, "data": data}
-        st.markdown("#### Raw JSON (Template + Data)")
+        st.markdown("#### Raw JSON (template + data)")
         st.json(bundle, expanded=False)
         st.download_button(
             "Download JSON (template + data)",
