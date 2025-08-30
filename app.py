@@ -61,7 +61,7 @@ def make_classroom_safe(text: str) -> str:
         r"\babuse(d|s|ive)?\b": "mistreatment",
         r"\bdrugs?\b": "substances",
         r"\balcohol\b": "drinks",
-        r"\bsex(ual|ually)?\b": "personal topic"
+        r"\bsex(ual|ually)?\b|\bsex\b": "personal topic"
     }
     for pat, sub in replacements.items():
         text = re.sub(pat, sub, text, flags=re.IGNORECASE)
@@ -70,34 +70,82 @@ def make_classroom_safe(text: str) -> str:
 # =========================
 # AZURE GPT CALL
 # =========================
-def call_azure_chat(messages, *, temperature=0.1, max_tokens=3200, force_json=False):
+def call_azure_chat(messages, *, temperature=0.1, max_tokens=5500, force_json=False):
+    """
+    Calls Azure OpenAI Chat Completions.
+    Uses response_format=json_object (preview) if requested.
+    """
     headers = {"Content-Type": "application/json", "api-key": AZURE_API_KEY}
     url = f"{AZURE_ENDPOINT.rstrip('/')}/openai/deployments/{AZURE_DEPLOYMENT}/chat/completions"
     params = {"api-version": AZURE_API_VERSION}
-    body = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+    body = {
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
     if force_json:
         body["response_format"] = {"type": "json_object"}
 
     try:
         r = requests.post(url, headers=headers, params=params, json=body, timeout=120)
         if r.status_code == 200:
-            return True, r.json()["choices"][0]["message"]["content"]
+            content = r.json()["choices"][0]["message"]["content"]
+            return True, content
+        # content filter hint
         if r.status_code == 400 and "filtered" in r.text.lower():
             return False, "FILTERED"
-        return False, f"Azure error {r.status_code}: {r.text[:300]}"
+        return False, f"Azure error {r.status_code}: {r.text[:500]}"
     except Exception as e:
         return False, f"Azure request failed: {e}"
 
+def strip_code_fences(s: str) -> str:
+    # Remove ```json ... ``` or ``` ... ```
+    s = re.sub(r"^```(?:json)?\s*", "", s.strip(), flags=re.IGNORECASE)
+    s = re.sub(r"\s*```$", "", s.strip())
+    return s
+
+def repair_json(s: str) -> str:
+    """
+    Try to repair common JSON issues:
+    - Strip code fences
+    - Replace smart quotes
+    - Remove trailing commas
+    - Ensure top-level object
+    """
+    if not s:
+        return s
+    s = strip_code_fences(s)
+
+    # Replace smart quotes
+    s = s.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+
+    # Remove trailing commas before } or ]
+    s = re.sub(r",(\s*[}\]])", r"\1", s)
+
+    # If the model wrapped JSON in prose, extract the first {...} block
+    m = re.search(r"\{[\s\S]*\}", s)
+    if m:
+        s = m.group(0)
+
+    return s.strip()
+
 def robust_parse(s: str):
+    """
+    Attempts normal parse → repaired parse → graceful failure with None.
+    """
+    if not s:
+        return None
+    # 1) Simple parse
     try:
         return json.loads(s)
     except Exception:
-        m = re.search(r"\{[\s\S]*\}", s)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except Exception:
-                return None
+        pass
+
+    # 2) Repair then parse
+    try:
+        fixed = repair_json(s)
+        return json.loads(fixed)
+    except Exception:
         return None
 
 # =========================
@@ -110,7 +158,11 @@ def ocr_read_any(bytes_blob: bytes) -> str:
     if not (AZURE_DI_ENDPOINT and AZURE_DI_KEY):
         return ""
     try:
-        client = DocumentIntelligenceClient(endpoint=AZURE_DI_ENDPOINT.rstrip("/"), credential=AzureKeyCredential(AZURE_DI_KEY))
+        client = DocumentIntelligenceClient(
+            endpoint=AZURE_DI_ENDPOINT.rstrip("/"),
+            credential=AzureKeyCredential(AZURE_DI_KEY)
+        )
+        # Compact call for the "read" model
         poller = client.begin_analyze_document("prebuilt-read", body=bytes_blob)
         doc = poller.result()
         parts = []
@@ -152,11 +204,9 @@ CATEGORIES = [
 def heuristic_guess_category(txt: str) -> str:
     t = txt.strip()
     lower = t.lower()
-    # quick signals
     if re.search(r'^\s*[A-Z].+\n[A-Z].+', t) and re.search(r'\n[A-Z][a-z]+:', t):  # NAME: dialogue
         return "play"
     if re.search(r'^[^\n]{0,80}\n[^\n]{0,80}\n[^\n]{0,80}(\n|$)', t) and re.search(r'[,.!?]\s*$', t) is None:
-        # short lines without heavy punctuation often indicate verse
         if len([ln for ln in t.splitlines() if ln.strip()]) <= 20:
             return "poetry"
     if any(k in lower for k in ["dear sir", "dear madam", "yours faithfully", "yours sincerely", "to,", "from:", "subject:"]):
@@ -183,9 +233,9 @@ def classify_with_gpt(txt: str, lang: str) -> str:
     user = f"Text:\n{safe}\n\nLabel only."
     ok, out = call_azure_chat(
         [{"role":"system","content":sys},{"role":"user","content":user}],
-        temperature=0.0, max_tokens=10, force_json=False
+        temperature=0.0, max_tokens=24, force_json=False
     )
-    if not ok:
+    if not ok or not out:
         return heuristic_guess_category(txt)
     label = out.strip().lower()
     label = re.sub(r'[^a-z_]', '', label)
@@ -436,22 +486,18 @@ SCHEMAS["poetry"]["activities"] = ACTIVITIES_BLOCK
 
 def build_schema_prompt(category: str, language_code: str, detail: int, evidence_count: int, teacher_mode: bool) -> str:
     """
-    Strongly instruct the model to provide MIN COUNTS using explicit requirements.
+    Strong instructions: Keep outputs concise and bounded so they fit token limits.
     """
-    schema = dict(SCHEMAS.get(category, SCHEMAS["story"]))  # copy
+    schema = dict(SCHEMAS.get(category, SCHEMAS["story"]))  # shallow copy
     if teacher_mode:
         schema["teacher_view"] = TEACHER_VIEW
 
     hard_rules = f"""
 STRICT OUTPUT REQUIREMENTS (OBEY):
-- Provide AT LEAST {evidence_count} items in each of these (if relevant to the text): 
-  themes_detailed, quote_bank, questions_short, questions_long, emotional_arc,
-  activities.pre_reading, activities.during_reading, activities.post_reading,
-  teacher_view.discussion_questions, teacher_view.quick_assessment_mcq.
-- If the text cannot support {evidence_count}, create additional but plausible items that remain faithful to the text's content and tone.
+- For each list/array in this schema, provide AT MOST {evidence_count} items. Prefer concise entries.
+- If a section does not apply to this text, OMIT that key entirely.
 - Keep answers classroom-safe; quote evidence verbatim where asked.
-- Do not include explanations outside the JSON.
-- Ensure arrays exist (not a single object) when items are requested.
+- Return ONLY a JSON object. No markdown, no comments, no extra text.
 """
 
     return (
@@ -460,9 +506,8 @@ STRICT OUTPUT REQUIREMENTS (OBEY):
         "Classroom-safe wording; quote evidence verbatim; avoid speculation beyond text.\n\n"
         f"Target language: {language_code}\n"
         f"Detected category: {category}\n"
-        f"Detail level (1-5): {detail}  — Higher = more bullet items and richer explanations.\n"
-        f"Target evidence/examples per major section: ~{evidence_count}\n"
-        "If a section does not apply to this text, omit that key entirely.\n"
+        f"Detail level (1-5): {detail} — Higher = more bullet items and richer explanations (but stay concise).\n"
+        f"Item budget per major list: ≤ {evidence_count}\n"
         + hard_rules +
         "\nSchema:\n" + json.dumps(schema, ensure_ascii=False, indent=2)
     )
@@ -486,7 +531,6 @@ def _split_or_clone_quotes(item, target_len):
     if isinstance(item, str):
         text = item
     elif isinstance(item, dict):
-        # find potential quote field
         for k in ("evidence", "quote", "evidence_quotes"):
             v = item.get(k)
             if isinstance(v, str):
@@ -497,11 +541,9 @@ def _split_or_clone_quotes(item, target_len):
                 break
     if not text or target_len <= 1:
         return [item]
-    # split by sentence-ish boundaries
     chunks = re.split(r"\s*(?:\|\||\|\.|[.;]\s+|\n)\s*", text)
     chunks = [c.strip(" |") for c in chunks if c.strip()]
     if len(chunks) >= target_len:
-        # rebuild items with single chunk
         if isinstance(item, dict):
             items = []
             for c in chunks[:target_len]:
@@ -535,7 +577,6 @@ def enforce_minimums(data: dict, n: int) -> dict:
         base = {"theme": f"Theme {idx+1}", "explanation": "Reinforced insight.", "evidence_quotes": []}
         if isinstance(prev, dict):
             p = dict(prev)
-            # mark reinforced
             p["explanation"] = (p.get("explanation","") + " (reinforced)").strip()
             return p
         return base
@@ -545,7 +586,6 @@ def enforce_minimums(data: dict, n: int) -> dict:
     if isinstance(themes, list) and themes:
         expanded = []
         for t in themes:
-            # attempt to split evidence to reach n before padding
             items = _split_or_clone_quotes(t, n)
             expanded.extend(items)
         if len(expanded) < n:
@@ -723,7 +763,7 @@ with cols_top[0]:
 with cols_top[1]:
     detail_level = st.slider("Detail level", 1, 5, 5, help="Controls depth & count of bullets/tables returned.")
 with cols_top[2]:
-    evidence_per_section = st.slider("Evidence/examples per section", 1, 6, 5)
+    evidence_per_section = st.slider("Evidence/examples per section", 1, 6, 3)
 with cols_top[3]:
     teacher_mode = st.toggle("Include Teacher View", value=True, help="Adds objectives, MCQs, and discussion set.")
 
@@ -780,7 +820,10 @@ if run:
 
     # 1) Category detection (heuristic + GPT)
     guessed = heuristic_guess_category(source_text)
-    cat = classify_with_gpt(source_text, explain_lang) or guessed
+    try:
+        cat = classify_with_gpt(source_text, explain_lang) or guessed
+    except Exception:
+        cat = guessed
     chip(f"Category: {cat}", "#16a34a")
 
     # 2) Build category-specific prompt + call GPT-4o
@@ -796,8 +839,8 @@ if run:
     with st.spinner("Calling GPT-4o for advanced structured analysis…"):
         ok, content = call_azure_chat(
             [{"role":"system","content":system_msg},{"role":"user","content":user_msg}],
-            temperature=0.2 if detail_level >= 4 else 0.12,
-            max_tokens=3200,
+            temperature=0.15 if detail_level >= 4 else 0.1,
+            max_tokens=5500,
             force_json=True
         )
 
@@ -805,15 +848,25 @@ if run:
         st.warning("⚠️ Sensitive content detected. Retrying in tighter student-safe mode…")
         ok, content = call_azure_chat(
             [{"role":"system","content":"You are a cautious school literature teacher. Avoid explicit terms; use neutral wording."},
-             {"role":"user","content":f"Return JSON for category '{cat}' with detail level {detail_level} and AT LEAST {evidence_per_section} items per section in language {explain_lang}. Text:\n{safe_text}"}],
-            temperature=0.0, max_tokens=2800, force_json=True
+             {"role":"user","content":f"Return ONLY JSON for category '{cat}' with detail level {detail_level} and ≤ {evidence_per_section} items per list in language {explain_lang}. Text:\n{safe_text}\nSchema will be inferred from the text type; keep it concise."}],
+            temperature=0.0, max_tokens=5000, force_json=True
         )
 
     if not ok:
         st.error(content)
         st.stop()
 
-    data = robust_parse(content) or {}
+    data = robust_parse(content)
+    if not isinstance(data, dict) or not data:
+        # Last-ditch attempt: ask for minimal skeleton to ensure valid JSON
+        st.info("The model returned malformed JSON. Retrying with a minimal skeleton…")
+        ok2, content2 = call_azure_chat(
+            [{"role":"system","content":system_msg},
+             {"role":"user","content":f"Return ONLY a SMALL JSON object for a '{cat}' analysis with ≤ {evidence_per_section} items per list. Keep keys minimal: executive_summary, about_author, themes_detailed, quote_bank. Text:\n{safe_text}"}],
+            temperature=0.0, max_tokens=2000, force_json=True
+        )
+        data = robust_parse(content2) if ok2 else None
+
     if not isinstance(data, dict) or not data:
         st.error("Model did not return valid JSON.")
         st.stop()
@@ -860,7 +913,6 @@ if run:
             h2("One-sentence takeaway", "✅")
             st.write(data.get("one_sentence_takeaway","—"))
 
-        # Category-specific insights
         if cat == "poetry":
             if data.get("structure_overview"):
                 h2("Structure overview", "🧩")
