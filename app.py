@@ -21,7 +21,7 @@ except Exception:
 # PAGE CONFIG
 # =========================
 st.set_page_config(page_title="Suvichaar — Literature Insight", page_icon="📚", layout="wide")
-st.title("📚 Suvichaar — Literature Insight (Templates + Q&A + Exports)")
+st.title("📚 Suvichaar — Literature Insight Model")
 st.caption(
     "Upload/paste text → OCR → Auto-detect category → Editable category template → "
     "Generate structured analysis, short/long answers, and quiz → Export HTML/JSON."
