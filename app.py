@@ -81,7 +81,7 @@ def strip_code_fences(s: str) -> str:
 def extract_first_json_object(s: str) -> str:
     """
     Robustly extract the first top-level {...} JSON object from any text, even if
-    the model printed extra prose in Hindi/English around it.
+    the model printed extra prose around it.
     """
     if not s:
         return ""
@@ -326,6 +326,9 @@ ASSESSMENT_RUBRIC = [{
     "levels": {"exemplary": "descriptor", "proficient": "descriptor", "developing": "descriptor", "emerging": "descriptor"}
 }]
 
+# avoid walrus inside dict literals; bind once
+ACTV = ACTIVITIES_BLOCK
+
 SCHEMAS = {
     "poetry": {
         **BASE_SAFE_FIELDS,
@@ -341,7 +344,7 @@ SCHEMAS = {
         "line_by_line": [{"line": "original line", "explanation": "meaning", "device_notes": "optional"}],
         "context_or_background": "poet/era/culture if relevant",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTIVITIES_BLOCK,  # py<3.8 compatible: no walrus usage later
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": ["..."],
         "quote_bank": ["..."],
@@ -664,8 +667,8 @@ table{{border-collapse:collapse;width:100%}} th,td{{border:1px solid #e5e7eb;pad
 <div class="card"><h2>Quote Bank</h2>{list_html(data.get('quote_bank') or [])}</div>
 
 <div class="card"><h2>Short Q&A</h2>{list_html([f"Q: {qa.get('q','')} — A: {qa.get('a','')}" for qa in (qas.get('short') or [])])}</div>
-<div class="card"><h2>Long Q&A</h2>{list_html([f\"Q: {qa.get('q','')} — A: {qa.get('a','')}\" for qa in (qas.get('long') or [])])}</div>
-<div class="card"><h2>Quiz</h2>{list_html([f\"{i+1}. {q.get('q','')} (Ans: {q.get('answer','?')})\" for i,q in enumerate(quiz)])}</div>
+<div class="card"><h2>Long Q&A</h2>{list_html([f"Q: {qa.get('q','')} — A: {qa.get('a','')}" for qa in (qas.get('long') or [])])}</div>
+<div class="card"><h2>Quiz</h2>{list_html([f"{i+1}. {q.get('q','')} (Ans: {q.get('answer','?')})" for i,q in enumerate(quiz)])}</div>
 
 <div class="small">© Suvichaar Literature Insight</div>
 </body></html>"""
@@ -765,7 +768,7 @@ if run:
         def pad_list(lst, n, filler):
             return _pad_list(lst if isinstance(lst, list) else [], n, filler)
         qas["short"] = pad_list(qas.get("short"), short_q_count, fill_short)
-        qas["long"]  = pad_list(qas.get("long"), long_q_count, fill_long)
+        qas["long"]  = pad_list(qas.get("long"),  long_q_count,  fill_long)
         def fill_mcq(prev, idx):
             return {"q": f"Extra MCQ {idx}", "choices": ["A","B","C","D"], "answer":"A"}
         quiz = pad_list(quiz, quiz_count, fill_mcq)
