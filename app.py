@@ -341,7 +341,7 @@ SCHEMAS = {
         "line_by_line": [{"line": "original line", "explanation": "meaning", "device_notes": "optional"}],
         "context_or_background": "poet/era/culture if relevant",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV := ACTIVITIES_BLOCK,  # py<3.8 compatible: no walrus usage later
+        "activities": ACTIVITIES_BLOCK,  # py<3.8 compatible: no walrus usage later
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": ["..."],
         "quote_bank": ["..."],
