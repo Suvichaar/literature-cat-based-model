@@ -1,3 +1,4 @@
+# app.py
 import os
 import re
 import json
@@ -7,7 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# Optional: OCR SDK (Azure Document Intelligence)
+# --- Azure Document Intelligence (OCR) ---
 try:
     from azure.ai.documentintelligence import DocumentIntelligenceClient
     from azure.core.credentials import AzureKeyCredential
@@ -19,11 +20,11 @@ except Exception:
 # =========================
 # PAGE CONFIG
 # =========================
-st.set_page_config(page_title="Suvichaar — Literature Insight (Template + Q&A)", page_icon="📚", layout="wide")
-st.title("📚 Suvichaar — Literature Insight")
+st.set_page_config(page_title="Suvichaar — Literature Insight", page_icon="📚", layout="wide")
+st.title("📚 Suvichaar — Literature Insight (Templates + Q&A + Exports)")
 st.caption(
     "Upload/paste text → OCR → Auto-detect category → Editable category template → "
-    "Generate structured analysis + short/long answers + quizzes."
+    "Generate structured analysis, short/long answers, and quiz → Export HTML/JSON."
 )
 
 
@@ -79,8 +80,7 @@ def call_azure_chat(messages, *, temperature=0.1, max_tokens=4000, force_json=Fa
     params = {"api-version": AZURE_API_VERSION}
     body = {"messages": messages, "temperature": temperature, "max_tokens": max_tokens}
     if force_json:
-        # new preview flag for strict JSON
-        body["response_format"] = {"type": "json_object"}
+        body["response_format"] = {"type": "json_object"}  # strict JSON output (preview)
     try:
         r = requests.post(url, headers=headers, params=params, json=body, timeout=120)
         if r.status_code == 200:
@@ -165,11 +165,13 @@ def detect_hi_or_en(text: str) -> str:
     return "hi" if (devanagari / total) >= 0.25 else "en"
 
 
+# =========================
+# CATEGORY DETECTION
+# =========================
 CATEGORIES = [
     "poetry", "play", "story", "essay", "biography", "autobiography",
     "speech", "letter", "diary", "report", "folk_tale", "myth", "legend"
 ]
-
 
 def heuristic_guess_category(txt: str) -> str:
     t = txt.strip()
@@ -219,13 +221,13 @@ def classify_with_gpt(txt: str, lang: str) -> str:
 
 
 # =========================
-# CATEGORY-SPECIFIC TEMPLATES (EDITABLE)
+# CATEGORY TEMPLATES (EDITABLE)
 # =========================
 TEMPLATES = {
     "poetry": {
         "sections": [
             "Title & Poet",
-            "Speaker/Voice & Point of View",
+            "Speaker/Voice & POV",
             "Context/Background (era, movement)",
             "Central Idea (Gist)",
             "Structure (stanzas, rhyme scheme, meter, line length)",
@@ -258,8 +260,8 @@ TEMPLATES = {
             "Themes & Messages",
             "Tone & Mood / Atmosphere",
             "Important Quotes (with function)",
-            "Vocabulary & Meanings (archaic/Elizabethan etc.)",
-            "Comparative Texts/Productions (optional)",
+            "Vocabulary & Meanings",
+            "Comparative Productions (optional)",
             "Study Tips",
             "Extension Reading",
             "Activities (table-read, blocking, radio play), Projects",
@@ -277,7 +279,7 @@ TEMPLATES = {
             "Conflict (type & stakes)",
             "Themes & Messages",
             "Symbols & Motifs",
-            "Tone & Mood / Style",
+            "Tone & Style",
             "Important Quotes (evidence)",
             "Vocabulary & Meanings",
             "Comparative Texts (optional)",
@@ -459,29 +461,49 @@ TEMPLATES = {
 
 
 # =========================
-# PROMPT BUILDERS
+# PROMPT BUILDERS (MORE DETAILED)
 # =========================
 def build_analysis_prompt(category: str, language_code: str, detail: int, evidence_cap: int, selected_sections: list) -> str:
     """
-    Ask the model to fill a compact 'data' object aligned to the chosen sections.
+    Ask the model to fill a compact 'data' object aligned to the chosen sections,
+    with a *bit more detail* than before. We softly target 4–6 items for key lists.
     """
+    # try to hit a richer target within caps
+    target_min = max(3, evidence_cap)             # minimum items per list we try to cover
+    target_max = max(target_min + 1, evidence_cap + 2)  # soft upper bound (model may return up to cap)
+
+    extra_keys = []
+    if category == "poetry":
+        extra_keys = ["devices", "imagery_map", "symbol_table", "line_by_line", "structure_overview", "speaker_or_voice"]
+    elif category in ("play", "story"):
+        extra_keys = ["characters", "plot_points", ("dialogue_beats" if category == "play" else "")]
+    elif category == "essay":
+        extra_keys = ["thesis", "key_points", "rhetorical_devices"]
+
     schema_hint = {
-        "executive_summary": "4–6 lines overview",
-        "inspiration_hook": "curiosity hook",
-        "why_it_matters": "transferable skills/values",
-        "study_tips": ["concise tips"],
-        "extension_reading": ["related texts"]
+        "executive_summary": "6–8 lines overview (concise sentences)",
+        "inspiration_hook": "curiosity hook (1–2 lines)",
+        "why_it_matters": "transferable skills/values (2–3 lines)",
+        "study_tips": [f"{target_min}–{min(6, target_max)} concise tips"],
+        "extension_reading": [f"{target_min}–{min(6, target_max)} related texts"],
+        "themes_detailed": [f"{target_min}–{min(6, target_max)} themes with 1–2 evidence quotes each"],
+        "quote_bank": [f"{target_min}–{min(6, target_max)} key lines (verbatim)"]
     }
+
     return (
         "You are an expert literature teacher. Analyze the text below in a CLASSROOM-SAFE way.\n"
-        "Return ONLY JSON with a single key 'data'. Keep arrays concise and capped.\n"
-        f"Target language: {language_code}\n"
+        "Return ONLY JSON with a single key 'data'. No markdown, no comments.\n"
+        f"Language: {language_code}\n"
         f"Category: {category}\n"
-        f"Detail level (1-5): {detail}\n"
-        f"Max items per list: {evidence_cap}\n"
+        f"Detail level (1–5): {detail} (aim for rich but concise coverage)\n"
+        f"For list fields, aim for {target_min}–{min(6, target_max)} items, but DO NOT exceed {evidence_cap} per list.\n"
         "Required keys (as supported by text): executive_summary, inspiration_hook, why_it_matters, "
-        "study_tips, extension_reading, themes_detailed, quote_bank.\n"
-        "Also align content to these section headings from the teacher template:\n"
+        "study_tips, extension_reading, themes_detailed, quote_bank, tone_mood.\n"
+        "If available from this category, also include: "
+        + ", ".join([k for k in extra_keys if k]) + ".\n"
+        "Additionally include: literal_meaning (1–3 lines), figurative_meaning (1–3 lines), "
+        "one_sentence_takeaway (single line), emotional_arc (3–5 beats with evidence).\n"
+        "Align content to these teacher sections (titles to guide organization):\n"
         + json.dumps(selected_sections, ensure_ascii=False)
         + "\nSchema hints:\n" + json.dumps(schema_hint, ensure_ascii=False, indent=2)
     )
@@ -490,32 +512,172 @@ def build_analysis_prompt(category: str, language_code: str, detail: int, eviden
 def build_qa_prompt(kind: str, count: int, language_code: str, difficulty: str = "balanced") -> str:
     """
     kind: 'short', 'long', or 'quiz'
-    - short → 1–2 line answers
-    - long → 5–8 line model answers with quotes
-    - quiz → MCQs with 4 options and correct answer key
     """
     if kind == "short":
         return (
-            "Create short-answer Q&A for the given text. "
-            f"Return ONLY JSON with key 'questions_short' as an array of {count} objects {{q,a}}.\n"
-            "Answers should be 1-2 lines, classroom-safe, and evidence-based."
+            "Create SHORT-ANSWER Q&A for the given text. "
+            f"Return ONLY JSON with key 'questions_short' as an array of exactly {count} objects {{q,a}}.\n"
+            "Answers must be 2–3 lines and include a brief textual cue or short quote when helpful. "
+            "Classroom-safe phrasing only."
             f"\nLanguage: {language_code}. Difficulty: {difficulty}."
         )
     if kind == "long":
         return (
-            "Create analytical long-answer Q&A for the given text. "
-            f"Return ONLY JSON with key 'questions_long' as an array of {count} objects {{q,a}}.\n"
-            "Each answer should be 5–8 lines and include brief textual evidence in quotes."
+            "Create ANALYTICAL LONG-ANSWER Q&A for the given text. "
+            f"Return ONLY JSON with key 'questions_long' as an array of exactly {count} objects {{q,a}}.\n"
+            "Each answer should be 6–10 lines, well-structured, and include 1–2 brief quotes as evidence. "
+            "Prefer depth and clear reasoning."
             f"\nLanguage: {language_code}. Difficulty: {difficulty}."
         )
-    # quiz
     return (
-        "Create multiple-choice questions (MCQs) for the given text. "
-        f"Return ONLY JSON with key 'quiz' as an array of {count} objects "
+        "Create MULTIPLE-CHOICE questions (MCQs) for the given text. "
+        f"Return ONLY JSON with key 'quiz' as an array of exactly {count} objects "
         "{{q, choices:[A,B,C,D], answer}}.\n"
-        "Questions must be unambiguous; one correct answer only; choices plausible."
+        "One unambiguous correct answer; choices plausible and distinct; keep stems concise."
         f"\nLanguage: {language_code}. Difficulty: {difficulty}."
     )
+
+
+# =========================
+# PORTABLE HTML EXPORT
+# =========================
+def build_portable_html(bundle: dict) -> str:
+    """Portable HTML snapshot: template + data + QAs + quiz."""
+    cat = (bundle.get("category") or "").title()
+    data = bundle.get("data") or {}
+    qshort = bundle.get("questions_short") or []
+    qlong  = bundle.get("questions_long") or []
+    quiz   = bundle.get("quiz") or []
+    template = bundle.get("template") or {}
+    sections = template.get("sections", [])
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    def esc(x):
+        return (str(x) if x is not None else "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+    def list_html(items):
+        if not items: return "<p>—</p>"
+        lis = "".join(f"<li>{esc(i)}</li>" for i in items)
+        return f"<ul>{lis}</ul>"
+
+    # pieces
+    summary = esc(data.get("executive_summary") or data.get("one_sentence_takeaway") or "")
+    hook = esc(data.get("inspiration_hook") or "")
+    why  = esc(data.get("why_it_matters") or "")
+    tips = data.get("study_tips") or []
+    ext  = data.get("extension_reading") or []
+    themes = data.get("themes_detailed") or []
+    quotes = data.get("quote_bank") or []
+    author = data.get("about_author") or {}
+    characters = data.get("characters") or []
+    devices = data.get("devices") or []
+    imagery = data.get("imagery_map") or []
+    symbols = data.get("symbol_table") or []
+    line_by_line = data.get("line_by_line") or []
+    plot_points = data.get("plot_points") or []
+    dialogue_beats = data.get("dialogue_beats") or []
+
+    theme_rows = ""
+    for t in themes:
+        theme_rows += f"<tr><td>{esc(t.get('theme',''))}</td><td>{esc(t.get('explanation',''))}</td><td>{esc(' | '.join(t.get('evidence_quotes',[]) or []))}</td></tr>"
+
+    char_rows = ""
+    for c in characters:
+        traits = ", ".join(c.get('traits',[]) or [])
+        motives = ", ".join(c.get('motives',[]) or [])
+        char_rows += f"<tr><td>{esc(c.get('name',''))}</td><td>{esc(c.get('role',''))}</td><td>{esc(traits)}</td><td>{esc(motives)}</td><td>{esc(c.get('arc_or_change',''))}</td></tr>"
+
+    device_rows = ""
+    for d in devices:
+        device_rows += f"<tr><td>{esc(d.get('name',''))}</td><td>{esc(d.get('evidence',''))}</td><td>{esc(d.get('explanation',''))}</td></tr>"
+
+    plot_rows = ""
+    for p in plot_points:
+        plot_rows += f"<tr><td>{esc(p.get('stage',''))}</td><td>{esc(p.get('what_happens',''))}</td><td>{esc(p.get('evidence',''))}</td></tr>"
+
+    beats_rows = ""
+    for b in dialogue_beats:
+        beats_rows += f"<tr><td>{esc(b.get('speaker',''))}</td><td>{esc(b.get('line',''))}</td><td>{esc(b.get('note',''))}</td></tr>"
+
+    qshort_rows = ""
+    for qa in qshort:
+        qshort_rows += f"<tr><td>{esc(qa.get('q',''))}</td><td>{esc(qa.get('a',''))}</td></tr>"
+
+    qlong_rows = ""
+    for qa in qlong:
+        qlong_rows += f"<tr><td>{esc(qa.get('q',''))}</td><td>{esc(qa.get('a',''))}</td></tr>"
+
+    quiz_rows = ""
+    for q in quiz:
+        ch = q.get("choices") or []
+        ch_s = " | ".join([esc(x) for x in ch])
+        quiz_rows += f"<tr><td>{esc(q.get('q',''))}</td><td>{ch_s}</td><td>{esc(q.get('answer',''))}</td></tr>"
+
+    html = f"""
+<!doctype html><html><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Literature Insight — {esc(cat)}</title>
+<style>
+body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;line-height:1.5;margin:24px;color:#0f172a}}
+h1,h2,h3{{color:#0f172a;margin:0.4em 0}}
+.card{{border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:12px 0;background:#fff}}
+table{{border-collapse:collapse;width:100%}}
+th,td{{border:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}}
+.small{{color:#475569;font-size:12px}}
+.kbd{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f1f5f9;border-radius:6px;padding:2px 6px}}
+</style></head>
+<body>
+<h1>Literature Insight — {esc(cat)}</h1>
+<div class="small">Generated: {ts}</div>
+
+<div class="card"><h2>Executive Summary</h2><p>{summary or '—'}</p></div>
+<div class="card"><h2>Inspiration Hook</h2><p>{hook or '—'}</p></div>
+<div class="card"><h2>Why It Matters</h2><p>{why or '—'}</p></div>
+
+<div class="card"><h2>Study Tips</h2>{list_html(tips)}</div>
+<div class="card"><h2>Extension Reading</h2>{list_html(ext)}</div>
+
+<div class="card">
+<h2>Themes & Evidence</h2>
+<table><thead><tr><th>Theme</th><th>Explanation</th><th>Evidence</th></tr></thead>
+<tbody>{theme_rows or '<tr><td colspan="3">—</td></tr>'}</tbody></table>
+</div>
+
+<div class="card"><h2>Quote Bank</h2>{list_html(quotes)}</div>
+
+{"<div class='card'><h2>Characters</h2><table><thead><tr><th>Name</th><th>Role</th><th>Traits</th><th>Motives</th><th>Arc/Change</th></tr></thead><tbody>"+(char_rows or '<tr><td colspan=\"5\">—</td></tr>')+"</tbody></table></div>" if characters else ""}
+
+{"<div class='card'><h2>Devices</h2><table><thead><tr><th>Device</th><th>Evidence</th><th>Why</th></tr></thead><tbody>"+(device_rows or '<tr><td colspan=\"3\">—</td></tr>')+"</tbody></table></div>" if devices else ""}
+
+{"<div class='card'><h2>Plot Points</h2><table><thead><tr><th>Stage</th><th>What Happens</th><th>Evidence</th></tr></thead><tbody>"+(plot_rows or '<tr><td colspan=\"3\">—</td></tr>')+"</tbody></table></div>" if plot_points else ""}
+
+{"<div class='card'><h2>Dialogue Beats</h2><table><thead><tr><th>Speaker</th><th>Line</th><th>Note</th></tr></thead><tbody>"+(beats_rows or '<tr><td colspan=\"3\">—</td></tr>')+"</tbody></table></div>" if dialogue_beats else ""}
+
+<div class="card">
+<h2>Short Answers</h2>
+<table><thead><tr><th>Question</th><th>Answer</th></tr></thead>
+<tbody>{qshort_rows or '<tr><td colspan="2">—</td></tr>'}</tbody></table>
+</div>
+
+<div class="card">
+<h2>Long Answers</h2>
+<table><thead><tr><th>Question</th><th>Answer</th></tr></thead>
+<tbody>{qlong_rows or '<tr><td colspan="2">—</td></tr>'}</tbody></table>
+</div>
+
+<div class="card">
+<h2>Quiz (MCQ)</h2>
+<table><thead><tr><th>Question</th><th>Choices</th><th>Answer</th></tr></thead>
+<tbody>{quiz_rows or '<tr><td colspan="3">—</td></tr>'}</tbody></table>
+</div>
+
+<div class="card"><h2>Template Sections</h2>{list_html(sections)}</div>
+
+<div class="small">© Suvichaar Literature Insight</div>
+</body></html>
+"""
+    return html
 
 
 # =========================
@@ -525,39 +687,40 @@ st.markdown("### 📥 Input")
 text_input = st.text_area("Paste text (optional)", height=160, placeholder="Paste poem/play/story/essay here")
 files = st.file_uploader("Or upload an image/PDF", type=["jpg","jpeg","png","webp","tiff","pdf"], accept_multiple_files=False)
 
-cols = st.columns(5)
+cols = st.columns(6)
 with cols[0]:
     lang_choice = st.selectbox("Explanation language", ["Auto-detect","English","Hindi"], index=0)
 with cols[1]:
-    detail_level = st.slider("Detail level", 1, 5, 4)
+    detail_level = st.slider("Detail level", 1, 5, 5)  # nudge to 5 for richer data
 with cols[2]:
-    evidence_cap = st.slider("Max items per list", 1, 6, 3)
+    evidence_cap = st.slider("Max items per list", 2, 8, 5)  # allow richer lists
 with cols[3]:
-    gen_short = st.checkbox("Gen Short Answers")
+    gen_short = st.checkbox("Gen Short Answers", value=True)
 with cols[4]:
-    gen_long = st.checkbox("Gen Long Answers")
+    gen_long = st.checkbox("Gen Long Answers", value=True)
+with cols[5]:
+    gen_quiz = st.checkbox("Gen Quiz (MCQ)", value=True)
 
-cols2 = st.columns(3)
+cols2 = st.columns(2)
 with cols2[0]:
-    gen_quiz = st.checkbox("Gen Quiz (MCQ)")
+    quiz_count = st.number_input("Quiz count", min_value=6, max_value=20, value=10, step=1)
 with cols2[1]:
-    quiz_count = st.number_input("Quiz count", min_value=4, max_value=20, value=10, step=1)
-with cols2[2]:
     difficulty = st.selectbox("Difficulty", ["easy", "balanced", "challenging"], index=1)
 
 run = st.button("🔎 Analyze & Open Template")
 
 
 # =========================
+# SESSION STATE
+# =========================
+for key in ["template_df", "category", "source_text", "data", "questions_short", "questions_long", "quiz", "template_used"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
+
+
+# =========================
 # MAIN
 # =========================
-if "template_df" not in st.session_state:
-    st.session_state.template_df = None
-if "category" not in st.session_state:
-    st.session_state.category = None
-if "source_text" not in st.session_state:
-    st.session_state.source_text = ""
-
 if run:
     # 1) Build source text
     source_text = (text_input or "").strip()
@@ -598,8 +761,8 @@ if run:
     sections = template.get("sections", [])
     df = pd.DataFrame({"include": [True]*len(sections), "section": sections})
     st.session_state.template_df = df
+    st.session_state.template_used = {"sections": sections}
 
-    # feedback chips
     st.success(f"Language: {explain_lang}  •  Category detected: {cat}")
 
 
@@ -618,6 +781,8 @@ if st.session_state.template_df is not None and st.session_state.category is not
 
     # Selected sections (in order, included only)
     selected_sections = [r["section"] for _, r in edited_df.iterrows() if bool(r["include"]) and str(r["section"]).strip()]
+    if not selected_sections:
+        st.info("Select at least one section to guide the generator.")
 
     # Controls for generation
     st.markdown("### ⚙️ Generation Controls")
@@ -644,24 +809,26 @@ if st.session_state.template_df is not None and st.session_state.category is not
         + (" Respond in Hindi." if explain_lang.startswith("hi") else " Respond in English.")
     )
 
-    # 1) Structured Analysis
+    # 1) Structured Analysis (more detailed)
     if regen_analysis:
         with st.spinner("Generating structured analysis…"):
             prompt = build_analysis_prompt(category, explain_lang, detail_level, evidence_cap, selected_sections)
             ok, content = call_azure_chat(
                 [{"role": "system", "content": sys_msg},
                  {"role": "user", "content": f"TEXT:\n{safe_text}\n\n{prompt}"}],
-                temperature=0.15 if detail_level >= 4 else 0.1,
-                max_tokens=3500,
+                temperature=0.18 if detail_level >= 4 else 0.12,
+                max_tokens=3600,
                 force_json=True
             )
         if not ok and content == "FILTERED":
             st.warning("Sensitive content detected. Retrying with tighter safe mode…")
             ok, content = call_azure_chat(
                 [{"role": "system", "content": "You are a cautious school literature teacher. Avoid explicit terms; use neutral wording."},
-                 {"role": "user", "content": f"Return ONLY JSON with 'data' for category '{category}'. Keep arrays ≤ {evidence_cap}. Language {explain_lang}.\nTEXT:\n{safe_text}"}],
+                 {"role": "user", "content": f"Return ONLY JSON with 'data' for category '{category}'. "
+                                              f"Keep arrays ≤ {evidence_cap}. Language {explain_lang}.\nTEXT:\n{safe_text}"}],
                 temperature=0.0, max_tokens=3000, force_json=True
             )
+
         if not ok:
             st.error(content)
         else:
@@ -670,17 +837,20 @@ if st.session_state.template_df is not None and st.session_state.category is not
             if not isinstance(data, dict):
                 st.error("Model didn't return valid JSON with a top-level 'data' object.")
             else:
+                st.session_state.data = data
                 st.markdown("#### 📦 Structured Analysis (JSON)")
                 st.json(data, expanded=False)
 
     # 2) Short Answers
     if gen_short and make_short:
         with st.spinner("Generating short answers…"):
-            prompt = build_qa_prompt("short", evidence_cap if evidence_cap >= 3 else 3, explain_lang)
+            # default to 5 if user set cap small
+            short_n = max(5, int(evidence_cap))
+            prompt = build_qa_prompt("short", short_n, explain_lang, difficulty=difficulty)
             ok, content = call_azure_chat(
                 [{"role": "system", "content": sys_msg},
                  {"role": "user", "content": f"TEXT:\n{safe_text}\n\n{prompt}"}],
-                temperature=0.12, max_tokens=2000, force_json=True
+                temperature=0.12, max_tokens=2200, force_json=True
             )
         if not ok:
             st.error(content)
@@ -690,17 +860,19 @@ if st.session_state.template_df is not None and st.session_state.category is not
             if not isinstance(arr, list):
                 st.error("Expected key 'questions_short' as an array.")
             else:
+                st.session_state.questions_short = arr
                 st.markdown("#### ❔ Short Q&A")
                 st.table(arr)
 
     # 3) Long Answers
     if gen_long and make_long:
         with st.spinner("Generating long answers…"):
-            prompt = build_qa_prompt("long", max(3, evidence_cap), explain_lang, difficulty=difficulty)
+            long_n = max(5, int(evidence_cap))
+            prompt = build_qa_prompt("long", long_n, explain_lang, difficulty=difficulty)
             ok, content = call_azure_chat(
                 [{"role": "system", "content": sys_msg},
                  {"role": "user", "content": f"TEXT:\n{safe_text}\n\n{prompt}"}],
-                temperature=0.15, max_tokens=2800, force_json=True
+                temperature=0.16, max_tokens=3000, force_json=True
             )
         if not ok:
             st.error(content)
@@ -710,6 +882,7 @@ if st.session_state.template_df is not None and st.session_state.category is not
             if not isinstance(arr, list):
                 st.error("Expected key 'questions_long' as an array.")
             else:
+                st.session_state.questions_long = arr
                 st.markdown("#### 🧩 Long Q&A (Analytical)")
                 st.table(arr)
 
@@ -720,7 +893,7 @@ if st.session_state.template_df is not None and st.session_state.category is not
             ok, content = call_azure_chat(
                 [{"role": "system", "content": sys_msg},
                  {"role": "user", "content": f"TEXT:\n{safe_text}\n\n{prompt}"}],
-                temperature=0.15, max_tokens=2500, force_json=True
+                temperature=0.15, max_tokens=2600, force_json=True
             )
         if not ok:
             st.error(content)
@@ -730,5 +903,160 @@ if st.session_state.template_df is not None and st.session_state.category is not
             if not isinstance(arr, list):
                 st.error("Expected key 'quiz' as an array.")
             else:
+                st.session_state.quiz = arr
                 st.markdown("#### 📝 Quiz (MCQ)")
                 st.table(arr)
+
+    # ============= PRESENTATION LAYOUT =============
+    st.markdown("---")
+    tabs = st.tabs([
+        "Overview", "Text Insights", "Characters / Devices", "Themes & Quotes",
+        "Q&A", "Quiz", "Export"
+    ])
+
+    data = st.session_state.data or {}
+
+    # ----- Overview -----
+    with tabs[0]:
+        st.markdown("### 🧭 Executive Summary")
+        st.write(data.get("executive_summary") or data.get("one_sentence_takeaway") or "—")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("### ✨ Inspiration Hook")
+            st.write(data.get("inspiration_hook") or "—")
+        with c2:
+            st.markdown("### 🎯 Why It Matters")
+            st.write(data.get("why_it_matters") or "—")
+
+        c3, c4 = st.columns(2)
+        with c3:
+            st.markdown("### 📝 Study Tips")
+            tips = data.get("study_tips") or []
+            st.write("\n".join(f"• {x}" for x in tips) or "—")
+        with c4:
+            st.markdown("### 📚 Extension Reading")
+            ext = data.get("extension_reading") or []
+            st.write("\n".join(f"• {x}" for x in ext) or "—")
+
+    # ----- Text Insights -----
+    with tabs[1]:
+        lcol, rcol = st.columns(2)
+        with lcol:
+            st.markdown("### 📘 Literal Meaning")
+            st.write(data.get("literal_meaning", "—"))
+            st.markdown("### 🌊 Figurative Meaning / Themes")
+            st.write(data.get("figurative_meaning", "—"))
+        with rcol:
+            st.markdown("### 🎼 Tone & Mood")
+            st.write(data.get("tone_mood", "—"))
+            st.markdown("### ✅ One-sentence Takeaway")
+            st.write(data.get("one_sentence_takeaway", "—"))
+
+        # Poetry-specific
+        if st.session_state.category == "poetry":
+            if data.get("structure_overview"):
+                st.markdown("### 🧩 Structure Overview")
+                st.json(data["structure_overview"], expanded=False)
+            if data.get("line_by_line"):
+                st.markdown("### 📖 Line-by-Line / Section-wise")
+                st.table(data["line_by_line"])
+
+    # ----- Characters / Devices -----
+    with tabs[2]:
+        if st.session_state.category in ("play", "story"):
+            if data.get("characters"):
+                st.markdown("### 👥 Characters")
+                # Show a tidy character table
+                rows = []
+                for c in data["characters"]:
+                    rows.append({
+                        "name": c.get("name",""),
+                        "role": c.get("role",""),
+                        "traits": ", ".join(c.get("traits",[]) or []),
+                        "motives": ", ".join(c.get("motives",[]) or []),
+                        "arc": c.get("arc_or_change","")
+                    })
+                st.table(rows)
+            if st.session_state.category == "play" and data.get("dialogue_beats"):
+                st.markdown("### 💬 Dialogue Beats")
+                st.table(data["dialogue_beats"])
+            if data.get("plot_points"):
+                st.markdown("### 🧭 Plot Points")
+                st.table(data["plot_points"])
+
+        if st.session_state.category == "poetry":
+            if data.get("devices"):
+                st.markdown("### 🎭 Devices (Poetic/Literary/Sound)")
+                st.table([{
+                    "device": d.get("name",""),
+                    "evidence": d.get("evidence",""),
+                    "why": d.get("explanation","")
+                } for d in data["devices"]])
+            if data.get("imagery_map"):
+                st.markdown("### 🌈 Imagery Map")
+                st.table(data["imagery_map"])
+            if data.get("symbol_table"):
+                st.markdown("### 🔶 Symbols")
+                st.table(data["symbol_table"])
+
+    # ----- Themes & Quotes -----
+    with tabs[3]:
+        if data.get("themes_detailed"):
+            st.markdown("### 🧠 Themes & Evidence")
+            st.table([{
+                "theme": t.get("theme",""),
+                "explanation": t.get("explanation",""),
+                "evidence": " | ".join(t.get("evidence_quotes",[]) or [])
+            } for t in data["themes_detailed"]])
+        if data.get("quote_bank"):
+            st.markdown("### ❝ Quote Bank")
+            st.write("\n".join(f"• {q}" for q in data["quote_bank"]))
+
+    # ----- Q&A -----
+    with tabs[4]:
+        if st.session_state.questions_short:
+            st.markdown("### ❔ Short Answers")
+            st.table(st.session_state.questions_short)
+        if st.session_state.questions_long:
+            st.markdown("### 🧩 Long Answers (Analytical)")
+            st.table(st.session_state.questions_long)
+
+    # ----- Quiz -----
+    with tabs[5]:
+        if st.session_state.quiz:
+            st.markdown("### 📝 Quiz (MCQ)")
+            st.table(st.session_state.quiz)
+
+    # ----- Export -----
+    with tabs[6]:
+        st.markdown("### ⬇️ Export")
+        # Build bundle
+        bundle = {
+            "category": st.session_state.category,
+            "template": {"sections": selected_sections or (st.session_state.template_used or {}).get("sections", [])},
+            "data": st.session_state.data or {},
+            "questions_short": st.session_state.questions_short or [],
+            "questions_long": st.session_state.questions_long or [],
+            "quiz": st.session_state.quiz or []
+        }
+
+        # JSON bundle
+        json_bytes = json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")
+        st.download_button(
+            "Download JSON (template + data + Q&A + quiz)",
+            data=json_bytes,
+            file_name=f"literature_{st.session_state.category}_bundle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            use_container_width=True
+        )
+
+        # HTML snapshot
+        html_str = build_portable_html(bundle)
+        st.download_button(
+            "Download Portable HTML",
+            data=html_str.encode("utf-8"),
+            file_name=f"literature_{st.session_state.category}_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+            mime="text/html",
+            use_container_width=True
+        )
