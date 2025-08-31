@@ -464,19 +464,14 @@ TEMPLATES = {
 # PROMPT BUILDERS (MORE DETAILED)
 # =========================
 def build_analysis_prompt(category: str, language_code: str, detail: int, evidence_cap: int, selected_sections: list) -> str:
-    """
-    Ask the model to fill a compact 'data' object aligned to the chosen sections,
-    with a *bit more detail* than before. We softly target 4–6 items for key lists.
-    """
-    # try to hit a richer target within caps
-    target_min = max(3, evidence_cap)             # minimum items per list we try to cover
-    target_max = max(target_min + 1, evidence_cap + 2)  # soft upper bound (model may return up to cap)
+    target_min = max(3, evidence_cap)
+    target_max = max(target_min + 1, evidence_cap + 2)
 
     extra_keys = []
     if category == "poetry":
         extra_keys = ["devices", "imagery_map", "symbol_table", "line_by_line", "structure_overview", "speaker_or_voice"]
     elif category in ("play", "story"):
-        extra_keys = ["characters", "plot_points", ("dialogue_beats" if category == "play" else "")]
+        extra_keys = ["characters", "plot_points"] + (["dialogue_beats"] if category == "play" else [])
     elif category == "essay":
         extra_keys = ["thesis", "key_points", "rhetorical_devices"]
 
@@ -493,8 +488,7 @@ def build_analysis_prompt(category: str, language_code: str, detail: int, eviden
     return (
         "You are an expert literature teacher. Analyze the text below in a CLASSROOM-SAFE way.\n"
         "Return ONLY JSON with a single key 'data'. No markdown, no comments.\n"
-        f"Language: {language_code}\n"
-        f"Category: {category}\n"
+        f"Language: {language_code}\nCategory: {category}\n"
         f"Detail level (1–5): {detail} (aim for rich but concise coverage)\n"
         f"For list fields, aim for {target_min}–{min(6, target_max)} items, but DO NOT exceed {evidence_cap} per list.\n"
         "Required keys (as supported by text): executive_summary, inspiration_hook, why_it_matters, "
@@ -510,9 +504,6 @@ def build_analysis_prompt(category: str, language_code: str, detail: int, eviden
 
 
 def build_qa_prompt(kind: str, count: int, language_code: str, difficulty: str = "balanced") -> str:
-    """
-    kind: 'short', 'long', or 'quiz'
-    """
     if kind == "short":
         return (
             "Create SHORT-ANSWER Q&A for the given text. "
@@ -539,10 +530,115 @@ def build_qa_prompt(kind: str, count: int, language_code: str, difficulty: str =
 
 
 # =========================
+# ROBUST RENDER HELPERS (COERCERS)
+# =========================
+def _as_dict(x):
+    """Coerce any value into a dictish structure for safe .get usage."""
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        return {"_value": x}
+    return {}
+
+def _coerce_device(x):
+    d = _as_dict(x)
+    return {
+        "device": d.get("name") or d.get("device") or d.get("_value", ""),
+        "evidence": d.get("evidence") or d.get("quote") or d.get("example", ""),
+        "why": d.get("explanation") or d.get("why") or ""
+    }
+
+def _coerce_imagery(x):
+    d = _as_dict(x)
+    return {
+        "sense": d.get("sense") or "",
+        "evidence": d.get("evidence") or d.get("quote") or d.get("_value",""),
+        "effect": d.get("effect") or ""
+    }
+
+def _coerce_symbol(x):
+    d = _as_dict(x)
+    return {
+        "symbol": d.get("symbol") or d.get("_value",""),
+        "meaning": d.get("meaning") or "",
+        "evidence": d.get("evidence") or d.get("quote") or ""
+    }
+
+def _coerce_line_by_line(x):
+    d = _as_dict(x)
+    return {
+        "line": d.get("line") or d.get("_value",""),
+        "explanation": d.get("explanation") or "",
+        "device_notes": d.get("device_notes") or d.get("notes") or ""
+    }
+
+def _coerce_character(x):
+    d = _as_dict(x)
+    traits = d.get("traits")
+    if isinstance(traits, str): traits = [traits]
+    motives = d.get("motives")
+    if isinstance(motives, str): motives = [motives]
+    return {
+        "name": d.get("name") or d.get("_value",""),
+        "role": d.get("role") or "",
+        "traits": ", ".join(traits or []),
+        "motives": ", ".join(motives or []),
+        "arc": d.get("arc_or_change") or d.get("arc") or ""
+    }
+
+def _coerce_plot_point(x):
+    d = _as_dict(x)
+    return {
+        "stage": d.get("stage") or "",
+        "what_happens": d.get("what_happens") or d.get("_value",""),
+        "evidence": d.get("evidence") or d.get("quote") or ""
+    }
+
+def _coerce_dialogue(x):
+    d = _as_dict(x)
+    return {
+        "speaker": d.get("speaker") or "",
+        "line": d.get("line") or d.get("_value",""),
+        "note": d.get("note") or ""
+    }
+
+def _coerce_theme(x):
+    d = _as_dict(x)
+    ev = d.get("evidence_quotes")
+    if isinstance(ev, str): ev = [ev]
+    return {
+        "theme": d.get("theme") or d.get("_value",""),
+        "explanation": d.get("explanation") or "",
+        "evidence": " | ".join(ev or [])
+    }
+
+def _coerce_qshort(x):
+    d = _as_dict(x)
+    return {"q": d.get("q") or d.get("_value",""), "a": d.get("a") or ""}
+
+def _coerce_qlong(x):
+    d = _as_dict(x)
+    return {"q": d.get("q") or d.get("_value",""), "a": d.get("a") or ""}
+
+def _coerce_quiz(x):
+    d = _as_dict(x)
+    choices = d.get("choices")
+    if isinstance(choices, dict):
+        # sometimes models return {"A":"...","B":"...","C":"...","D":"..."}
+        choices = [choices.get(k,"") for k in ["A","B","C","D"]]
+    if isinstance(choices, str):
+        # split on | or ;
+        parts = re.split(r"\s*[|;]\s*", choices)
+        choices = [p.strip() for p in parts if p.strip()]
+    if not isinstance(choices, list):
+        choices = []
+    return {"q": d.get("q") or d.get("_value",""), "choices": choices, "answer": d.get("answer") or ""}
+
+
+# =========================
 # PORTABLE HTML EXPORT
 # =========================
 def build_portable_html(bundle: dict) -> str:
-    """Portable HTML snapshot: template + data + QAs + quiz."""
     cat = (bundle.get("category") or "").title()
     data = bundle.get("data") or {}
     qshort = bundle.get("questions_short") or []
@@ -560,64 +656,43 @@ def build_portable_html(bundle: dict) -> str:
         lis = "".join(f"<li>{esc(i)}</li>" for i in items)
         return f"<ul>{lis}</ul>"
 
-    # pieces
-    summary = esc(data.get("executive_summary") or data.get("one_sentence_takeaway") or "")
-    hook = esc(data.get("inspiration_hook") or "")
-    why  = esc(data.get("why_it_matters") or "")
-    tips = data.get("study_tips") or []
-    ext  = data.get("extension_reading") or []
-    themes = data.get("themes_detailed") or []
-    quotes = data.get("quote_bank") or []
-    author = data.get("about_author") or {}
-    characters = data.get("characters") or []
-    devices = data.get("devices") or []
-    imagery = data.get("imagery_map") or []
-    symbols = data.get("symbol_table") or []
-    line_by_line = data.get("line_by_line") or []
-    plot_points = data.get("plot_points") or []
-    dialogue_beats = data.get("dialogue_beats") or []
+    # Coerced rows
+    themes = [ _coerce_theme(t) for t in (data.get("themes_detailed") or []) ]
+    theme_rows = "".join([f"<tr><td>{esc(t['theme'])}</td><td>{esc(t['explanation'])}</td><td>{esc(t['evidence'])}</td></tr>" for t in themes])
 
-    theme_rows = ""
-    for t in themes:
-        theme_rows += f"<tr><td>{esc(t.get('theme',''))}</td><td>{esc(t.get('explanation',''))}</td><td>{esc(' | '.join(t.get('evidence_quotes',[]) or []))}</td></tr>"
+    characters = [ _coerce_character(c) for c in (data.get("characters") or []) ]
+    char_rows = "".join([f"<tr><td>{esc(c['name'])}</td><td>{esc(c['role'])}</td><td>{esc(c['traits'])}</td><td>{esc(c['motives'])}</td><td>{esc(c['arc'])}</td></tr>" for c in characters])
 
-    char_rows = ""
-    for c in characters:
-        traits = ", ".join(c.get('traits',[]) or [])
-        motives = ", ".join(c.get('motives',[]) or [])
-        char_rows += f"<tr><td>{esc(c.get('name',''))}</td><td>{esc(c.get('role',''))}</td><td>{esc(traits)}</td><td>{esc(motives)}</td><td>{esc(c.get('arc_or_change',''))}</td></tr>"
+    devices = [ _coerce_device(d) for d in (data.get("devices") or []) ]
+    device_rows = "".join([f"<tr><td>{esc(d['device'])}</td><td>{esc(d['evidence'])}</td><td>{esc(d['why'])}</td></tr>" for d in devices])
 
-    device_rows = ""
-    for d in devices:
-        device_rows += f"<tr><td>{esc(d.get('name',''))}</td><td>{esc(d.get('evidence',''))}</td><td>{esc(d.get('explanation',''))}</td></tr>"
+    plot_points = [ _coerce_plot_point(p) for p in (data.get("plot_points") or []) ]
+    plot_rows = "".join([f"<tr><td>{esc(p['stage'])}</td><td>{esc(p['what_happens'])}</td><td>{esc(p['evidence'])}</td></tr>" for p in plot_points])
 
-    plot_rows = ""
-    for p in plot_points:
-        plot_rows += f"<tr><td>{esc(p.get('stage',''))}</td><td>{esc(p.get('what_happens',''))}</td><td>{esc(p.get('evidence',''))}</td></tr>"
+    dialogue_beats = [ _coerce_dialogue(b) for b in (data.get("dialogue_beats") or []) ]
+    beats_rows = "".join([f"<tr><td>{esc(b['speaker'])}</td><td>{esc(b['line'])}</td><td>{esc(b['note'])}</td></tr>" for b in dialogue_beats])
 
-    beats_rows = ""
-    for b in dialogue_beats:
-        beats_rows += f"<tr><td>{esc(b.get('speaker',''))}</td><td>{esc(b.get('line',''))}</td><td>{esc(b.get('note',''))}</td></tr>"
-
-    qshort_rows = ""
-    for qa in qshort:
-        qshort_rows += f"<tr><td>{esc(qa.get('q',''))}</td><td>{esc(qa.get('a',''))}</td></tr>"
-
-    qlong_rows = ""
-    for qa in qlong:
-        qlong_rows += f"<tr><td>{esc(qa.get('q',''))}</td><td>{esc(qa.get('a',''))}</td></tr>"
+    qshort_rows = "".join([f"<tr><td>{esc(_coerce_qshort(q)['q'])}</td><td>{esc(_coerce_qshort(q)['a'])}</td></tr>" for q in qshort])
+    qlong_rows  = "".join([f"<tr><td>{esc(_coerce_qlong(q)['q'])}</td><td>{esc(_coerce_qlong(q)['a'])}</td></tr>" for q in qlong])
 
     quiz_rows = ""
     for q in quiz:
-        ch = q.get("choices") or []
-        ch_s = " | ".join([esc(x) for x in ch])
-        quiz_rows += f"<tr><td>{esc(q.get('q',''))}</td><td>{ch_s}</td><td>{esc(q.get('answer',''))}</td></tr>"
+        cq = _coerce_quiz(q)
+        ch_s = " | ".join([esc(x) for x in cq["choices"]])
+        quiz_rows += f"<tr><td>{esc(cq['q'])}</td><td>{ch_s}</td><td>{esc(cq['answer'])}</td></tr>"
+
+    summary = (data.get("executive_summary") or data.get("one_sentence_takeaway") or "")
+    hook = data.get("inspiration_hook") or ""
+    why  = data.get("why_it_matters") or ""
+    tips = data.get("study_tips") or []
+    ext  = data.get("extension_reading") or []
+    quotes = data.get("quote_bank") or []
 
     html = f"""
 <!doctype html><html><head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Literature Insight — {esc(cat)}</title>
+<title>Literature Insight — {cat}</title>
 <style>
 body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;line-height:1.5;margin:24px;color:#0f172a}}
 h1,h2,h3{{color:#0f172a;margin:0.4em 0}}
@@ -625,15 +700,14 @@ h1,h2,h3{{color:#0f172a;margin:0.4em 0}}
 table{{border-collapse:collapse;width:100%}}
 th,td{{border:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}}
 .small{{color:#475569;font-size:12px}}
-.kbd{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;background:#f1f5f9;border-radius:6px;padding:2px 6px}}
 </style></head>
 <body>
-<h1>Literature Insight — {esc(cat)}</h1>
+<h1>Literature Insight — {cat}</h1>
 <div class="small">Generated: {ts}</div>
 
-<div class="card"><h2>Executive Summary</h2><p>{summary or '—'}</p></div>
-<div class="card"><h2>Inspiration Hook</h2><p>{hook or '—'}</p></div>
-<div class="card"><h2>Why It Matters</h2><p>{why or '—'}</p></div>
+<div class="card"><h2>Executive Summary</h2><p>{summary}</p></div>
+<div class="card"><h2>Inspiration Hook</h2><p>{hook}</p></div>
+<div class="card"><h2>Why It Matters</h2><p>{why}</p></div>
 
 <div class="card"><h2>Study Tips</h2>{list_html(tips)}</div>
 <div class="card"><h2>Extension Reading</h2>{list_html(ext)}</div>
@@ -672,8 +746,6 @@ th,td{{border:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}}
 <tbody>{quiz_rows or '<tr><td colspan="3">—</td></tr>'}</tbody></table>
 </div>
 
-<div class="card"><h2>Template Sections</h2>{list_html(sections)}</div>
-
 <div class="small">© Suvichaar Literature Insight</div>
 </body></html>
 """
@@ -691,9 +763,9 @@ cols = st.columns(6)
 with cols[0]:
     lang_choice = st.selectbox("Explanation language", ["Auto-detect","English","Hindi"], index=0)
 with cols[1]:
-    detail_level = st.slider("Detail level", 1, 5, 5)  # nudge to 5 for richer data
+    detail_level = st.slider("Detail level", 1, 5, 5)
 with cols[2]:
-    evidence_cap = st.slider("Max items per list", 2, 8, 5)  # allow richer lists
+    evidence_cap = st.slider("Max items per list", 2, 8, 5)
 with cols[3]:
     gen_short = st.checkbox("Gen Short Answers", value=True)
 with cols[4]:
@@ -844,7 +916,6 @@ if st.session_state.template_df is not None and st.session_state.category is not
     # 2) Short Answers
     if gen_short and make_short:
         with st.spinner("Generating short answers…"):
-            # default to 5 if user set cap small
             short_n = max(5, int(evidence_cap))
             prompt = build_qa_prompt("short", short_n, explain_lang, difficulty=difficulty)
             ok, content = call_azure_chat(
@@ -862,7 +933,7 @@ if st.session_state.template_df is not None and st.session_state.category is not
             else:
                 st.session_state.questions_short = arr
                 st.markdown("#### ❔ Short Q&A")
-                st.table(arr)
+                st.table([_coerce_qshort(x) for x in arr])
 
     # 3) Long Answers
     if gen_long and make_long:
@@ -884,7 +955,7 @@ if st.session_state.template_df is not None and st.session_state.category is not
             else:
                 st.session_state.questions_long = arr
                 st.markdown("#### 🧩 Long Q&A (Analytical)")
-                st.table(arr)
+                st.table([_coerce_qlong(x) for x in arr])
 
     # 4) Quiz
     if gen_quiz and make_quiz:
@@ -905,7 +976,7 @@ if st.session_state.template_df is not None and st.session_state.category is not
             else:
                 st.session_state.quiz = arr
                 st.markdown("#### 📝 Quiz (MCQ)")
-                st.table(arr)
+                st.table([_coerce_quiz(x) for x in arr])
 
     # ============= PRESENTATION LAYOUT =============
     st.markdown("---")
@@ -953,85 +1024,65 @@ if st.session_state.template_df is not None and st.session_state.category is not
             st.markdown("### ✅ One-sentence Takeaway")
             st.write(data.get("one_sentence_takeaway", "—"))
 
-        # Poetry-specific
         if st.session_state.category == "poetry":
             if data.get("structure_overview"):
                 st.markdown("### 🧩 Structure Overview")
                 st.json(data["structure_overview"], expanded=False)
             if data.get("line_by_line"):
                 st.markdown("### 📖 Line-by-Line / Section-wise")
-                st.table(data["line_by_line"])
+                st.table([_coerce_line_by_line(x) for x in data.get("line_by_line", [])])
 
     # ----- Characters / Devices -----
     with tabs[2]:
         if st.session_state.category in ("play", "story"):
             if data.get("characters"):
                 st.markdown("### 👥 Characters")
-                # Show a tidy character table
-                rows = []
-                for c in data["characters"]:
-                    rows.append({
-                        "name": c.get("name",""),
-                        "role": c.get("role",""),
-                        "traits": ", ".join(c.get("traits",[]) or []),
-                        "motives": ", ".join(c.get("motives",[]) or []),
-                        "arc": c.get("arc_or_change","")
-                    })
-                st.table(rows)
+                st.table([_coerce_character(c) for c in data["characters"]])
             if st.session_state.category == "play" and data.get("dialogue_beats"):
                 st.markdown("### 💬 Dialogue Beats")
-                st.table(data["dialogue_beats"])
+                st.table([_coerce_dialogue(b) for b in data["dialogue_beats"]])
             if data.get("plot_points"):
                 st.markdown("### 🧭 Plot Points")
-                st.table(data["plot_points"])
+                st.table([_coerce_plot_point(p) for p in data["plot_points"]])
 
         if st.session_state.category == "poetry":
             if data.get("devices"):
                 st.markdown("### 🎭 Devices (Poetic/Literary/Sound)")
-                st.table([{
-                    "device": d.get("name",""),
-                    "evidence": d.get("evidence",""),
-                    "why": d.get("explanation","")
-                } for d in data["devices"]])
+                st.table([_coerce_device(d) for d in data["devices"]])
             if data.get("imagery_map"):
                 st.markdown("### 🌈 Imagery Map")
-                st.table(data["imagery_map"])
+                st.table([_coerce_imagery(x) for x in data["imagery_map"]])
             if data.get("symbol_table"):
                 st.markdown("### 🔶 Symbols")
-                st.table(data["symbol_table"])
+                st.table([_coerce_symbol(x) for x in data["symbol_table"]])
 
     # ----- Themes & Quotes -----
     with tabs[3]:
         if data.get("themes_detailed"):
             st.markdown("### 🧠 Themes & Evidence")
-            st.table([{
-                "theme": t.get("theme",""),
-                "explanation": t.get("explanation",""),
-                "evidence": " | ".join(t.get("evidence_quotes",[]) or [])
-            } for t in data["themes_detailed"]])
+            st.table([_coerce_theme(t) for t in data["themes_detailed"]])
         if data.get("quote_bank"):
             st.markdown("### ❝ Quote Bank")
-            st.write("\n".join(f"• {q}" for q in data["quote_bank"]))
+            st.write("\n".join(f"• {q if isinstance(q,str) else q.get('quote','')}" for q in data["quote_bank"]))
 
     # ----- Q&A -----
     with tabs[4]:
         if st.session_state.questions_short:
             st.markdown("### ❔ Short Answers")
-            st.table(st.session_state.questions_short)
+            st.table([_coerce_qshort(x) for x in st.session_state.questions_short])
         if st.session_state.questions_long:
             st.markdown("### 🧩 Long Answers (Analytical)")
-            st.table(st.session_state.questions_long)
+            st.table([_coerce_qlong(x) for x in st.session_state.questions_long])
 
     # ----- Quiz -----
     with tabs[5]:
         if st.session_state.quiz:
             st.markdown("### 📝 Quiz (MCQ)")
-            st.table(st.session_state.quiz)
+            st.table([_coerce_quiz(x) for x in st.session_state.quiz])
 
     # ----- Export -----
     with tabs[6]:
         st.markdown("### ⬇️ Export")
-        # Build bundle
         bundle = {
             "category": st.session_state.category,
             "template": {"sections": selected_sections or (st.session_state.template_used or {}).get("sections", [])},
