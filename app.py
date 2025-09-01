@@ -320,7 +320,7 @@ SCHEMAS = {
         "line_by_line": [{"line": "", "explanation": "", "device_notes": ""}],
         "context_or_background": "",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTIVITIES_BLOCK,
+        "activities": ACTV := ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": [],
@@ -339,7 +339,7 @@ SCHEMAS = {
         "stage_directions": "",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTIVITIES_BLOCK,
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": [],
@@ -356,7 +356,7 @@ SCHEMAS = {
         "conflict": "",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTIVITIES_BLOCK,
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": [],
@@ -373,7 +373,7 @@ SCHEMAS = {
         "rhetorical_devices": [{"name": "", "evidence": "", "effect": ""}],
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": []
@@ -387,7 +387,7 @@ SCHEMAS = {
         "notable_works_or_contributions": [],
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "autobiography": {
@@ -397,7 +397,7 @@ SCHEMAS = {
         "themes_detailed": THEME_BLOCK,
         "voice_and_style": "",
         "about_author": ABOUT_AUTHOR,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "speech": {
@@ -409,7 +409,7 @@ SCHEMAS = {
         "call_to_action": "",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "letter": {
@@ -420,7 +420,7 @@ SCHEMAS = {
         "closing": "",
         "tone_register": "",
         "themes_detailed": THEME_BLOCK,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "diary": {
@@ -430,7 +430,7 @@ SCHEMAS = {
         "feelings": "",
         "reflection": "",
         "themes_detailed": THEME_BLOCK,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "report": {
@@ -439,7 +439,7 @@ SCHEMAS = {
         "sections": [{"heading": "", "summary": ""}],
         "findings": [],
         "recommendations": [],
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "folk_tale": {
@@ -450,7 +450,7 @@ SCHEMAS = {
         "repeating_patterns_or_motifs": [],
         "moral_or_lesson": "",
         "themes_detailed": THEME_BLOCK,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "myth": {
@@ -459,7 +459,7 @@ SCHEMAS = {
         "origin_or_explanation": "",
         "plot_outline": [],
         "themes_detailed": THEME_BLOCK,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "legend": {
@@ -468,7 +468,7 @@ SCHEMAS = {
         "historical_backdrop": "",
         "notable_events": [],
         "themes_detailed": THEME_BLOCK,
-       "activities": ACTIVITIES_BLOCK
+        "activities": ACTV,
         "assessment_rubric": ASSESSMENT_RUBRIC
     }
 }
