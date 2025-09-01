@@ -119,7 +119,6 @@ def call_azure_chat(messages, *, temperature=0.1, max_tokens=7000, force_json=Tr
         if r.status_code == 200:
             content = r.json()["choices"][0]["message"]["content"]
             return True, content
-        # content filter hint
         if r.status_code == 400 and "filtered" in r.text.lower():
             return False, "FILTERED"
         return False, f"Azure error {r.status_code}: {r.text[:800]}"
@@ -320,7 +319,7 @@ SCHEMAS = {
         "line_by_line": [{"line": "", "explanation": "", "device_notes": ""}],
         "context_or_background": "",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV := ACTIVITIES_BLOCK,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": [],
@@ -339,7 +338,7 @@ SCHEMAS = {
         "stage_directions": "",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": [],
@@ -356,7 +355,7 @@ SCHEMAS = {
         "conflict": "",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": [],
@@ -373,7 +372,7 @@ SCHEMAS = {
         "rhetorical_devices": [{"name": "", "evidence": "", "effect": ""}],
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": []
@@ -387,7 +386,7 @@ SCHEMAS = {
         "notable_works_or_contributions": [],
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "autobiography": {
@@ -397,7 +396,7 @@ SCHEMAS = {
         "themes_detailed": THEME_BLOCK,
         "voice_and_style": "",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "speech": {
@@ -409,7 +408,7 @@ SCHEMAS = {
         "call_to_action": "",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "letter": {
@@ -420,7 +419,7 @@ SCHEMAS = {
         "closing": "",
         "tone_register": "",
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "diary": {
@@ -430,7 +429,7 @@ SCHEMAS = {
         "feelings": "",
         "reflection": "",
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "report": {
@@ -439,7 +438,7 @@ SCHEMAS = {
         "sections": [{"heading": "", "summary": ""}],
         "findings": [],
         "recommendations": [],
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "folk_tale": {
@@ -450,7 +449,7 @@ SCHEMAS = {
         "repeating_patterns_or_motifs": [],
         "moral_or_lesson": "",
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "myth": {
@@ -459,7 +458,7 @@ SCHEMAS = {
         "origin_or_explanation": "",
         "plot_outline": [],
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     },
     "legend": {
@@ -468,7 +467,7 @@ SCHEMAS = {
         "historical_backdrop": "",
         "notable_events": [],
         "themes_detailed": THEME_BLOCK,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC
     }
 }
@@ -478,7 +477,6 @@ SCHEMAS = {
 # =========================
 def build_prompt(category: str, language_code: str, max_per_list: int, q_short_n: int, q_long_n: int, quiz_n: int) -> str:
     schema = SCHEMAS.get(category, SCHEMAS["story"])
-
     rules = f"""
 Return ONLY JSON with this exact top-level shape:
 {{
@@ -510,7 +508,7 @@ HARD RULES:
     )
 
 # =========================
-# NORMALIZERS (prevent .get() crashes, clean shapes)
+# NORMALIZERS
 # =========================
 def _normalize_list(val):
     return val if isinstance(val, list) else ([] if val in (None, "") else [val])
@@ -537,10 +535,8 @@ def norm_quiz(x):
     return {"q": str(x).strip(), "choices": [], "answer": ""}
 
 def normalize_data(data: dict) -> dict:
-    """Soft-normalize common sections so rendering is safe."""
     if not isinstance(data, dict):
         return {}
-
     # devices always list of dicts
     if "devices" in data:
         devs = _normalize_list(data.get("devices"))
@@ -549,7 +545,6 @@ def normalize_data(data: dict) -> dict:
             if isinstance(d, dict):
                 out.append({"name": d.get("name",""), "evidence": d.get("evidence",""), "explanation": d.get("explanation","")})
         data["devices"] = out
-
     # characters
     if "characters" in data:
         chars = _normalize_list(data.get("characters"))
@@ -565,7 +560,6 @@ def normalize_data(data: dict) -> dict:
                     "key_quotes": c.get("key_quotes", []) if isinstance(c.get("key_quotes"), list) else []
                 })
         data["characters"] = c_out
-
     # themes_detailed
     if "themes_detailed" in data:
         th = _normalize_list(data.get("themes_detailed"))
@@ -577,28 +571,22 @@ def normalize_data(data: dict) -> dict:
                     ev = [str(ev)]
                 t_out.append({"theme": t.get("theme",""), "explanation": t.get("explanation",""), "evidence_quotes": [str(x) for x in ev]})
         data["themes_detailed"] = t_out
-
-    # imagery_map / symbol_table / plot_points / dialogue_beats / line_by_line et al — ensure lists
+    # generic list keys
     for key in ["imagery_map", "symbol_table", "plot_points", "dialogue_beats", "line_by_line", "vocabulary_glossary",
                 "quote_bank", "comparative_texts", "cross_curricular_links", "adaptation_ideas", "homework"]:
         if key in data:
             lst = _normalize_list(data.get(key))
-            # keep only dicts for complex tables; strings for quote_bank ok
             if key in ["quote_bank", "adaptation_ideas", "homework"]:
                 data[key] = [str(x) for x in lst if isinstance(x, (str, int, float))]
             else:
                 data[key] = [x for x in lst if isinstance(x, dict)]
-
     return data
 
 def normalize_qas_quiz(qas: dict, quiz: list):
-    # QAs
     if not isinstance(qas, dict):
         qas = {}
     qas["short"] = [norm_q_short(x) for x in _normalize_list(qas.get("short", []))]
     qas["long"]  = [norm_q_long(x)  for x in _normalize_list(qas.get("long",  []))]
-
-    # Quiz
     quiz = [norm_quiz(x) for x in _normalize_list(quiz)]
     return qas, quiz
 
@@ -622,7 +610,6 @@ def build_portable_html(bundle: dict) -> str:
         v = data.get(key)
         return html.escape(v) if isinstance(v, str) and v.strip() else default
 
-    # Themes rows
     theme_rows = ""
     for t in data.get("themes_detailed", []) or []:
         theme = html.escape(str(t.get("theme","")))
@@ -630,11 +617,9 @@ def build_portable_html(bundle: dict) -> str:
         ev    = " | ".join([html.escape(str(x)) for x in (t.get("evidence_quotes",[]) or [])])
         theme_rows += f"<tr><td>{theme}</td><td>{expl}</td><td>{ev}</td></tr>"
 
-    # Q&A lists (render as bullet lines)
     short_items = [f"Q: {s.get('q','')} — A: {s.get('a','')}" for s in (qas.get("short") or [])]
     long_items  = [f"Q: {l.get('q','')} — A: {l.get('a','')}"  for l in (qas.get("long")  or [])]
 
-    # Quiz rows
     quiz_rows = ""
     for q in quiz:
         qq = html.escape(q.get("q",""))
@@ -769,10 +754,8 @@ if run:
         "Stick to evidence from the text."
         + (" Respond in Hindi." if explain_lang.startswith("hi") else " Respond in English.")
     )
-    user_msg = (
-        f"TEXT TO ANALYZE (verbatim):\n{safe_text}\n\n"
-        + build_prompt(cat, explain_lang, max_per_list, q_short_n, q_long_n, quiz_n)
-    )
+    from_text = f"TEXT TO ANALYZE (verbatim):\n{safe_text}\n\n"
+    user_msg = from_text + build_prompt(cat, explain_lang, max_per_list, q_short_n, q_long_n, quiz_n)
 
     with st.spinner("Calling Azure to generate structured data + Q&As + quiz…"):
         ok, content = call_azure_chat(
@@ -810,18 +793,13 @@ if run:
             while len(arr) < n:
                 arr.append(make(len(arr)+1))
             return arr
-
-        # themes_detailed
         if "themes_detailed" in data:
             data["themes_detailed"] = pad(
                 data["themes_detailed"], max_per_list,
                 lambda i: {"theme": f"Additional theme {i}", "explanation": "Reinforced insight.", "evidence_quotes": []}
             )
-        # quote_bank
         if "quote_bank" in data:
             data["quote_bank"] = pad(data["quote_bank"], max_per_list, lambda i: f"Reinforced quote {i}.")
-
-        # QAs & Quiz
         qas["short"] = pad(qas.get("short", []), q_short_n, lambda i: {"q": f"Additional short question {i}", "a": "Concise answer (reinforced)."})
         qas["long"]  = pad(qas.get("long",  []), q_long_n,  lambda i: {"q": f"Additional analytical question {i}", "a": "Evidence-based model answer (reinforced)."})
         quiz         = pad(quiz, quiz_n, lambda i: {"q": f"Extra MCQ {i}", "choices": ["A","B","C","D"], "answer":"A"})
@@ -881,15 +859,11 @@ if run:
                 st.json(data["structure_overview"], expanded=False)
             if show_line_by_line and data.get("line_by_line"):
                 st.subheader("📖 Line-by-line")
-                # Show only if meaningful items exist
                 rows = []
                 for it in data["line_by_line"]:
                     if isinstance(it, dict) and any(it.get(k) for k in ("line","explanation","device_notes")):
                         rows.append({"line": it.get("line",""), "explanation": it.get("explanation",""), "device_notes": it.get("device_notes","")})
-                if rows:
-                    st.table(rows)
-                else:
-                    st.write("—")
+                st.table(rows or [{"line":"—","explanation":"—","device_notes":"—"}])
             if show_devices_table and (data.get("devices") or []):
                 st.subheader("🎭 Devices")
                 rows = []
@@ -945,7 +919,7 @@ if run:
                     })
             st.table(rows or [{"name":"—","role":"—","traits":"—","motives":"—","arc":"—"}])
 
-    # ----- Themes & Quotes -----
+    # ----- Themes & Quotes + Activities & Rubric -----
     with tabs[4]:
         if data.get("themes_detailed"):
             st.subheader("🧠 Themes & Evidence")
@@ -961,7 +935,6 @@ if run:
             for section in ["pre_reading","during_reading","post_reading","creative_tasks","projects"]:
                 if acts.get(section):
                     st.subheader(f"🛠️ {section.replace('_',' ').title()}")
-                    # editable
                     st.data_editor(acts[section], use_container_width=True, num_rows="dynamic")
         if show_rubric and data.get("assessment_rubric"):
             st.subheader("🧪 Assessment Rubric")
@@ -1003,7 +976,6 @@ if run:
         st.subheader("⬇️ Export")
         bundle = {"category": cat, "template": study_template, "data": data, "qas": qas, "quiz": quiz}
 
-        # HTML
         html_str = build_portable_html(bundle)
         st.download_button(
             "Download portable HTML",
@@ -1013,7 +985,6 @@ if run:
             use_container_width=True
         )
 
-        # JSON
         st.markdown("#### Raw JSON (Template + Data + Q&As + Quiz)")
         st.json(bundle, expanded=False)
         st.download_button(
