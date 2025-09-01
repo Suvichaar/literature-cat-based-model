@@ -339,7 +339,7 @@ SCHEMAS = {
         "stage_directions": "",
         "themes_detailed": THEME_BLOCK,
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": [],
