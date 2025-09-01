@@ -320,7 +320,7 @@ SCHEMAS = {
         "line_by_line": [{"line": "", "explanation": "", "device_notes": ""}],
         "context_or_background": "",
         "about_author": ABOUT_AUTHOR,
-        "activities": ACTV := ACTIVITIES_BLOCK,
+        "activities": ACTIVITIES_BLOCK,
         "assessment_rubric": ASSESSMENT_RUBRIC,
         "homework": [],
         "quote_bank": [],
