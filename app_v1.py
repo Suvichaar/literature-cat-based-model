@@ -1,4 +1,4 @@
-# app.py
+# app.py # This is the curios model for literature model
 import os
 import re
 import json
