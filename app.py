@@ -339,7 +339,7 @@ with st.sidebar:
 # =========================
 colA, colB = st.columns([1, 1])
 with colA:
-    if st.button("🚀 Solve with GPT & Build Animated HTML", use_container_width=True):
+    if st.button("🚀 Let's solve ", use_container_width=True):
         if not problem_text.strip():
             st.error("Please provide a problem.")
             st.stop()
