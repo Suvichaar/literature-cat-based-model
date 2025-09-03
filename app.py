@@ -415,7 +415,6 @@ with left:
                 st.stop()
 
         st.success("Got result from GPT!")
-        st.json(result)
 
         with st.spinner("Building animated KaTeX HTML..."):
             html = build_animated_katex_html(result)
