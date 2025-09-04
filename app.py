@@ -12,9 +12,9 @@ import streamlit as st
 # =========================
 # PAGE SETUP
 # =========================
-st.set_page_config(page_title="PDF → DOCX (Azure DI) + Credits", page_icon="📄", layout="wide")
-st.title("📄 PDF → DOCX with Azure Document Intelligence (Read)")
-st.caption("Upload a PDF → Azure DI (prebuilt-read) extracts text → Download a .docx • Pricing: ₹3 per page (3 credits)")
+st.set_page_config(page_title="PDF → DOCX Suvichaars", page_icon="📄", layout="wide")
+st.title("📄 PDF → DOCX with SuvichaarDocument Intelligence")
+st.caption("Upload a PDF → SuvichaarDI (prebuilt-read) extracts text → Download a .docx • Pricing: ₹3 per page (3 credits)")
 
 # =========================
 # PRICING / CONSTANTS
@@ -39,7 +39,7 @@ AZURE_DI_KEY = get_secret("AZURE_DI_KEY")
 ADMIN_PIN = str(get_secret("ADMIN_PIN", "1133344444"))  # default fallback
 
 # =========================
-# AZURE SDK IMPORTS
+# SuvichaarSDK IMPORTS
 # =========================
 try:
     from azure.ai.documentintelligence import DocumentIntelligenceClient
@@ -184,7 +184,7 @@ with st.expander("⚙️ Settings", expanded=False):
 
 # If secrets not configured, allow input for this run (unique keys)
 if not AZURE_DI_ENDPOINT or not AZURE_DI_KEY:
-    st.info("Azure DI endpoint/key not found in st.secrets. Enter them for this session.")
+    st.info("SuvichaarDI endpoint/key not found in st.secrets. Enter them for this session.")
     AZURE_DI_ENDPOINT = st.text_input(
         "AZURE_DI_ENDPOINT",
         AZURE_DI_ENDPOINT or "",
@@ -207,14 +207,14 @@ uploaded = st.file_uploader("Upload a PDF", type=["pdf"], accept_multiple_files=
 @st.cache_resource(show_spinner=False)
 def make_client(endpoint: str, key: str):
     if DocumentIntelligenceClient is None or AzureKeyCredential is None:
-        raise RuntimeError("Azure SDK not installed. Run: pip install azure-ai-documentintelligence python-docx")
+        raise RuntimeError("SuvichaarSDK not installed. Run: pip install azure-ai-documentintelligence python-docx")
     if not endpoint or not key:
-        raise RuntimeError("Missing Azure DI endpoint or key.")
+        raise RuntimeError("Missing SuvichaarDI endpoint or key.")
     return DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
 
 def analyze_pdf_bytes(client: Any, pdf_bytes: bytes):
     """
-    Azure DI 'prebuilt-read' across multiple SDK variants.
+    SuvichaarDI 'prebuilt-read' across multiple SDK variants.
     """
     last_err = None
     try:
@@ -338,7 +338,7 @@ if uploaded is not None:
         try:
             client = make_client(AZURE_DI_ENDPOINT or "", AZURE_DI_KEY or "")
         except Exception as e:
-            st.error(f"Failed to create Azure DI client: {e}")
+            st.error(f"Failed to create SuvichaarDI client: {e}")
             st.stop()
 
         pdf_bytes = uploaded.read()
@@ -348,11 +348,11 @@ if uploaded is not None:
 
         fid = file_hash(pdf_bytes)
 
-        with st.spinner("Analyzing with Azure Document Intelligence (prebuilt-read)..."):
+        with st.spinner("Analyzing with SuvichaarDocument Intelligence (prebuilt-read)..."):
             try:
                 result = analyze_pdf_bytes(client, pdf_bytes)
             except Exception as e:
-                st.error(f"Azure DI analyze failed: {e}")
+                st.error(f"SuvichaarDI analyze failed: {e}")
                 st.stop()
 
         pages = len(getattr(result, "pages", []) or [])
