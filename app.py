@@ -1,8 +1,11 @@
 import io
+import os
+import json
 import base64
 import hashlib
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -19,6 +22,9 @@ st.caption("Upload a PDF → Azure DI (prebuilt-read) extracts text → Download
 CREDITS_START_BALANCE = 10_000
 PRICE_PER_PAGE_CREDITS = 3  # ₹3 == 3 credits
 
+# persistent store file (server-side)
+STORE_PATH = Path("./credits_store.json")
+
 # =========================
 # SECRETS / CONFIG
 # =========================
@@ -31,21 +37,6 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
 AZURE_DI_ENDPOINT = get_secret("AZURE_DI_ENDPOINT")
 AZURE_DI_KEY = get_secret("AZURE_DI_KEY")
 ADMIN_PIN = str(get_secret("ADMIN_PIN", "1133344444"))  # default fallback
-
-# =========================
-# STATE INIT
-# =========================
-if "credits_balance" not in st.session_state:
-    st.session_state.credits_balance = CREDITS_START_BALANCE
-
-if "charged_docs" not in st.session_state:
-    st.session_state.charged_docs = {}  # {file_hash: {"pages": int, "cost": int}}
-
-if "last_txn" not in st.session_state:
-    st.session_state.last_txn = None    # {"file": str, "pages": int, "cost": int, "ts": "..."}
-
-if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
 
 # =========================
 # AZURE SDK IMPORTS
@@ -66,16 +57,79 @@ from docx import Document
 from docx.shared import Pt
 
 # =========================
+# PERSISTENCE (STORE)
+# =========================
+DEFAULT_STORE: Dict[str, Any] = {
+    "credits_balance": CREDITS_START_BALANCE,
+    "charged_docs": {},   # file_hash -> {"pages": int, "cost": int, "file": str, "ts": str}
+    "last_txn": None,     # {"file": str, "pages": int, "cost": int, "ts": str}
+}
+
+def load_store() -> Dict[str, Any]:
+    if STORE_PATH.exists():
+        try:
+            with open(STORE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # sanity defaults
+            for k, v in DEFAULT_STORE.items():
+                data.setdefault(k, v)
+            return data
+        except Exception:
+            # corrupted store → reset
+            return DEFAULT_STORE.copy()
+    else:
+        return DEFAULT_STORE.copy()
+
+def save_store(store: Dict[str, Any]) -> None:
+    tmp = STORE_PATH.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(store, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STORE_PATH)
+
+# Load (or initialize) persistent store once per process
+if "store" not in st.session_state:
+    st.session_state.store = load_store()
+
+# local aliases to store values (for readability)
+def get_balance() -> int:
+    return int(st.session_state.store.get("credits_balance", CREDITS_START_BALANCE))
+
+def set_balance(val: int) -> None:
+    st.session_state.store["credits_balance"] = int(val)
+    save_store(st.session_state.store)
+
+def get_charged_docs() -> Dict[str, Any]:
+    return dict(st.session_state.store.get("charged_docs", {}))
+
+def set_charged_docs(d: Dict[str, Any]) -> None:
+    st.session_state.store["charged_docs"] = d
+    save_store(st.session_state.store)
+
+def get_last_txn() -> Optional[Dict[str, Any]]:
+    return st.session_state.store.get("last_txn")
+
+def set_last_txn(txn: Optional[Dict[str, Any]]) -> None:
+    st.session_state.store["last_txn"] = txn
+    save_store(st.session_state.store)
+
+# =========================
+# ADMIN SESSION FLAG
+# =========================
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
+
+# =========================
 # SIDEBAR: CREDITS + ADMIN
 # =========================
 with st.sidebar:
     st.subheader("💳 Credits")
-    max_display = max(CREDITS_START_BALANCE, st.session_state.credits_balance)
-    pct = min(max(st.session_state.credits_balance / float(max_display), 0.0), 1.0)
-    st.progress(pct, text=f"Balance: {st.session_state.credits_balance} credits")
+    max_display = max(CREDITS_START_BALANCE, get_balance())
+    pct = min(max(get_balance() / float(max_display), 0.0), 1.0)
+    st.progress(pct, text=f"Balance: {get_balance()} credits")
 
-    if st.session_state.last_txn:
-        txn = st.session_state.last_txn
+    # Last transaction (pretty card)
+    txn = get_last_txn()
+    if txn:
         st.markdown(
             f"""
             <div style="
@@ -97,6 +151,7 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
 
+    # Admin panel (refill only here)
     with st.expander("🔐 Admin Panel", expanded=False):
         pin_entered = st.text_input("Enter Admin PIN", type="password", key="admin_pin_input")
         if st.button("Login", key="admin_login_btn"):
@@ -111,13 +166,13 @@ with st.sidebar:
             st.markdown("**Admin Controls**")
             topup_amt = st.number_input("Top-up amount (credits)", min_value=1, value=100, step=50, key="admin_topup_amount")
             if st.button("Top-up Wallet", key="admin_topup_btn"):
-                st.session_state.credits_balance += int(topup_amt)
+                set_balance(get_balance() + int(topup_amt))
                 st.success(f"Wallet topped up by {int(topup_amt)} credits.")
 
             if st.button("Reset Wallet & History", key="admin_reset_btn"):
-                st.session_state.credits_balance = CREDITS_START_BALANCE
-                st.session_state.charged_docs.clear()
-                st.session_state.last_txn = None
+                # hard reset to defaults
+                st.session_state.store = DEFAULT_STORE.copy()
+                save_store(st.session_state.store)
                 st.success("Wallet reset to 10,000 and history cleared.")
 
 # =========================
@@ -195,9 +250,6 @@ def analyze_pdf_bytes(client: Any, pdf_bytes: bytes):
 
 def result_to_docx_bytes(result, insert_page_breaks: bool = True, show_conf: bool = False) -> bytes:
     """Convert DI 'prebuilt-read' result into a .docx."""
-    from docx import Document
-    from docx.shared import Pt
-
     doc = Document()
     style = doc.styles["Normal"]
     style.font.name = "Calibri"
@@ -243,24 +295,37 @@ def file_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 def charge_credits_once(file_id: str, pages: int, filename: str) -> int:
-    """Deduct credits exactly once per unique file hash."""
+    """Deduct credits exactly once per unique file hash (persisted)."""
     cost = pages * PRICE_PER_PAGE_CREDITS
-    if file_id in st.session_state.charged_docs:
+
+    charged_docs = get_charged_docs()
+    if file_id in charged_docs:
         st.info("⚠️ This file was already processed earlier. No credits deducted again.")
         return 0
-    if st.session_state.credits_balance < cost:
+
+    if get_balance() < cost:
         raise RuntimeError(
-            f"Insufficient credits: need {cost}, have {st.session_state.credits_balance}. "
+            f"Insufficient credits: need {cost}, have {get_balance()}. "
             "Please ask an admin to top-up credits."
         )
-    st.session_state.credits_balance -= cost
-    st.session_state.charged_docs[file_id] = {"pages": pages, "cost": cost}
-    st.session_state.last_txn = {
+
+    # Deduct and persist
+    set_balance(get_balance() - cost)
+    charged_docs[file_id] = {
+        "pages": pages,
+        "cost": cost,
+        "file": filename,
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    set_charged_docs(charged_docs)
+
+    set_last_txn({
         "file": filename,
         "pages": pages,
         "cost": cost,
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    })
+
     return cost
 
 # =========================
@@ -328,6 +393,6 @@ else:
 # FOOTER
 # =========================
 st.caption(
-    "Credits are session-scoped in this demo and locked for users. Only admins can refill using the PIN from st.secrets. "
+    "Credits persist across reloads in a server-side JSON store. Only admins can refill using the PIN from st.secrets. "
     f"Pricing: {PRICE_PER_PAGE_CREDITS} credits (₹{PRICE_PER_PAGE_CREDITS}) per page."
 )
