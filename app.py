@@ -27,8 +27,8 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     except Exception:
         return default
 
-AZURE_DI_ENDPOINT = get_secret("AZURE_DI_ENDPOINT", DEFAULT_AZURE_DI_ENDPOINT)
-AZURE_DI_KEY = get_secret("AZURE_DI_KEY", DEFAULT_AZURE_DI_KEY)
+AZURE_DI_ENDPOINT = get_secret("AZURE_DI_ENDPOINT")
+AZURE_DI_KEY = get_secret("AZURE_DI_KEY")
 
 # =========================
 # UI
