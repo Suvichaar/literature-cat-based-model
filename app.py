@@ -1,5 +1,6 @@
 import io
 import base64
+import hashlib
 from typing import Optional, Any
 
 import streamlit as st
@@ -23,8 +24,11 @@ from docx import Document
 from docx.shared import Pt
 
 # =========================
-# CONFIG / SECRETS
+# CONFIG / PRICING / SECRETS
 # =========================
+CREDITS_START_BALANCE = 10_000
+PRICE_PER_PAGE_CREDITS = 3  # ₹3 == 3 credits
+
 def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     try:
         return st.secrets[key]  # type: ignore[attr-defined]
@@ -34,24 +38,65 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
 AZURE_DI_ENDPOINT = get_secret("AZURE_DI_ENDPOINT")
 AZURE_DI_KEY = get_secret("AZURE_DI_KEY")
 
-st.set_page_config(page_title="PDF → DOCX (Azure Document Intelligence)", page_icon="📄", layout="centered")
-st.title("📄 PDF → DOCX with Azure Document Intelligence (Read)")
-st.caption("Upload a PDF → Azure DI (prebuilt-read) extracts text → Download a .docx")
+# =========================
+# STATE INIT
+# =========================
+if "credits_balance" not in st.session_state:
+    st.session_state.credits_balance = CREDITS_START_BALANCE
 
-with st.expander("Settings", expanded=False):
+# Tracks hashes of already-charged files to avoid double-charging on reruns
+if "charged_docs" not in st.session_state:
+    st.session_state.charged_docs = {}  # {file_hash: {"pages": int, "cost": int}}
+
+if "last_txn" not in st.session_state:
+    st.session_state.last_txn = None    # {"file": str, "pages": int, "cost": int}
+
+# =========================
+# UI SHELL
+# =========================
+st.set_page_config(page_title="PDF → DOCX (Azure DI) + Credits", page_icon="📄", layout="wide")
+st.title("📄 PDF → DOCX with Azure Document Intelligence (Read)")
+st.caption("Upload a PDF → Azure DI (prebuilt-read) extracts text → Download a .docx • Credits: ₹3 per page")
+
+# Sidebar: credits widget
+with st.sidebar:
+    st.subheader("💳 Credits")
+    max_display = max(CREDITS_START_BALANCE, st.session_state.credits_balance)
+    pct = st.session_state.credits_balance / max_display
+    st.progress(pct, text=f"Balance: {st.session_state.credits_balance} credits")
+
+    col_topup_1, col_topup_2 = st.columns([2,1])
+    with col_topup_1:
+        add_amt = st.number_input("Top-up amount (credits)", min_value=0, value=0, step=100, help="Demo top-up (1 credit = ₹1)")
+    with col_topup_2:
+        if st.button("Top-up"):
+            st.session_state.credits_balance += int(add_amt)
+            st.success(f"Topped up {int(add_amt)} credits.")
+    if st.button("Reset to 10,000"):
+        st.session_state.credits_balance = CREDITS_START_BALANCE
+        st.session_state.charged_docs.clear()
+        st.session_state.last_txn = None
+        st.info("Credits and charge history reset.")
+
+    if st.session_state.last_txn:
+        st.write("**Last transaction**")
+        st.json(st.session_state.last_txn, expanded=False)
+
+# Main settings
+with st.expander("⚙️ Settings", expanded=False):
     add_page_breaks = st.checkbox("Insert page breaks between PDF pages", value=True)
     include_confidence = st.checkbox("Append line confidence (debug)", value=False)
 
-# If secrets are not set, show inline inputs so you can still run locally
+# If secrets are not set, allow manual entry (local/dev)
 if not AZURE_DI_ENDPOINT or not AZURE_DI_KEY:
     st.info("Azure DI endpoint/key not found in st.secrets. Enter them below for this session.")
     AZURE_DI_ENDPOINT = st.text_input("AZURE_DI_ENDPOINT", AZURE_DI_ENDPOINT or "", placeholder="https://<resourcename>.cognitiveservices.azure.com/")
     AZURE_DI_KEY = st.text_input("AZURE_DI_KEY", AZURE_DI_KEY or "", type="password")
 
-uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
+uploaded = st.file_uploader("Upload a PDF", type=["pdf"], accept_multiple_files=False)
 
 # =========================
-# Helpers
+# HELPERS
 # =========================
 @st.cache_resource(show_spinner=False)
 def make_client(endpoint: str, key: str):
@@ -107,30 +152,22 @@ def analyze_pdf_bytes(client: Any, pdf_bytes: bytes):
     except Exception as e:
         last_err = e
 
-    # If we’re here, surface the most recent error
     raise last_err
 
 def result_to_docx_bytes(result, insert_page_breaks: bool = True, show_conf: bool = False) -> bytes:
     """
     Convert DI 'prebuilt-read' result into a simple DOCX.
-    - Writes per-line text (preserves reading order per page)
-    - Optional page breaks between pages
     """
     doc = Document()
-
-    # Basic style tweaks (optional)
     style = doc.styles["Normal"]
     style.font.name = "Calibri"
     style.font.size = Pt(11)
 
     if not getattr(result, "pages", None):
-        # Fallback: if we only have 'content', dump it
         doc.add_paragraph(getattr(result, "content", "") or "No content found.")
     else:
         for idx, page in enumerate(result.pages):
             doc.add_heading(f"Page {idx+1}", level=2)
-
-            # Prefer page.lines if present
             if getattr(page, "lines", None):
                 for ln in page.lines:
                     text = ln.content or ""
@@ -144,7 +181,6 @@ def result_to_docx_bytes(result, insert_page_breaks: bool = True, show_conf: boo
                     if text.strip():
                         doc.add_paragraph(text)
             else:
-                # Fallback: use result.paragraphs filtered by page number (best-effort)
                 paras = []
                 for p in getattr(result, "paragraphs", []) or []:
                     if getattr(p, "spans", None):
@@ -163,8 +199,38 @@ def result_to_docx_bytes(result, insert_page_breaks: bool = True, show_conf: boo
     doc.save(out)
     return out.getvalue()
 
+def file_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+def charge_credits_once(file_id: str, pages: int, filename: str) -> int:
+    """
+    Deduct credits exactly once per unique file hash.
+    Returns the charged cost (0 if already charged).
+    """
+    # Compute cost
+    cost = pages * PRICE_PER_PAGE_CREDITS
+
+    # Already charged?
+    if file_id in st.session_state.charged_docs:
+        # No new charge
+        st.info(f"⚠️ This file was already processed earlier. No credits deducted again.")
+        return 0
+
+    # Check balance
+    if st.session_state.credits_balance < cost:
+        raise RuntimeError(
+            f"Insufficient credits: need {cost}, have {st.session_state.credits_balance}. "
+            "Please top-up credits to proceed."
+        )
+
+    # Deduct and record
+    st.session_state.credits_balance -= cost
+    st.session_state.charged_docs[file_id] = {"pages": pages, "cost": cost}
+    st.session_state.last_txn = {"file": filename, "pages": pages, "cost": cost}
+    return cost
+
 # =========================
-# MAIN
+# MAIN FLOW
 # =========================
 if uploaded is not None:
     if not uploaded.name.lower().endswith(".pdf"):
@@ -182,12 +248,30 @@ if uploaded is not None:
             st.error("Uploaded file is empty. Please re-upload the PDF.")
             st.stop()
 
+        # Hash to prevent double-charging same file on reruns
+        fid = file_hash(pdf_bytes)
+
         with st.spinner("Analyzing with Azure Document Intelligence (prebuilt-read)..."):
             try:
                 result = analyze_pdf_bytes(client, pdf_bytes)
             except Exception as e:
                 st.error(f"Azure DI analyze failed: {e}")
                 st.stop()
+
+        # Determine page count (prefer DI pages)
+        pages = len(getattr(result, "pages", []) or [])
+        if pages <= 0:
+            pages = 1  # conservative fallback if pages unavailable
+        st.success(f"Extracted text from **{pages} page(s)**.")
+
+        # Attempt to charge credits (once per unique file)
+        try:
+            charged = charge_credits_once(fid, pages, uploaded.name)
+            if charged > 0:
+                st.toast(f"Charged {charged} credits for {pages} page(s).", icon="✅")
+        except RuntimeError as e:
+            st.error(str(e))
+            st.stop()
 
         # Build DOCX
         with st.spinner("Building DOCX..."):
@@ -201,7 +285,6 @@ if uploaded is not None:
                 st.error(f"Failed to create DOCX: {e}")
                 st.stop()
 
-        st.success("Done! Your DOCX is ready.")
         st.download_button(
             label="⬇️ Download .docx",
             data=docx_bytes,
@@ -215,3 +298,11 @@ if uploaded is not None:
 
 else:
     st.info("Upload a PDF to begin.")
+
+# =========================
+# FOOTER NOTE
+# =========================
+st.caption(
+    "Credits demo only (session-scoped). For production, store balances & transactions in a database per org/user. "
+    f"Pricing currently set to {PRICE_PER_PAGE_CREDITS} credits (₹{PRICE_PER_PAGE_CREDITS}) per page."
+)
