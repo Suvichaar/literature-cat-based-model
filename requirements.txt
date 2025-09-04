@@ -6,3 +6,4 @@ azure-ai-documentintelligence
 azure-cognitiveservices-speech
 openai
 matplotlib
+python-docx
