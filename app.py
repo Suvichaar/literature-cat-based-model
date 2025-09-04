@@ -29,7 +29,8 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
 
 AZURE_DI_ENDPOINT = get_secret("AZURE_DI_ENDPOINT")
 AZURE_DI_KEY = get_secret("AZURE_DI_KEY")
-ADMIN_PIN = get_secret("ADMIN_PIN", "")  # optional; if empty, admin panel can still be used by leaving PIN blank
+# Use st.secrets for admin PIN; default to "1133344444" if not provided
+ADMIN_PIN = str(get_secret("ADMIN_PIN", "1133344444"))
 
 # =========================
 # STATE INIT
@@ -105,13 +106,14 @@ with st.sidebar:
     # Admin panel (refill only here)
     with st.expander("🔐 Admin Panel", expanded=False):
         pin_entered = st.text_input("Enter Admin PIN", type="password")
-        if st.button("Login as Admin"):
-            if (ADMIN_PIN or "") == pin_entered:
+        if st.button("Login"):
+            # Compare strictly to st.secrets ADMIN_PIN
+            if pin_entered == ADMIN_PIN:
                 st.session_state.is_admin = True
-                st.success("Admin login successful.")
+                st.success("Login successful.")
             else:
                 st.session_state.is_admin = False
-                st.error("Invalid PIN.")
+                st.error("Wrong password")
 
         if st.session_state.is_admin:
             st.markdown("**Admin Controls**")
@@ -280,6 +282,18 @@ def charge_credits_once(file_id: str, pages: int, filename: str) -> int:
 # =========================
 # MAIN FLOW
 # =========================
+uploaded = st.file_uploader("Upload a PDF", type=["pdf"], accept_multiple_files=False)
+
+# If secrets not configured, allow user to input for this run
+with st.expander("⚙️ Settings", expanded=False):
+    add_page_breaks = st.checkbox("Insert page breaks between PDF pages", value=True)
+    include_confidence = st.checkbox("Append line confidence (debug)", value=False)
+
+if not AZURE_DI_ENDPOINT or not AZURE_DI_KEY:
+    st.info("Azure DI endpoint/key not found in st.secrets. Enter them for this session.")
+    AZURE_DI_ENDPOINT = st.text_input("AZURE_DI_ENDPOINT", AZURE_DI_ENDPOINT or "", placeholder="https://<resourcename>.cognitiveservices.azure.com/")
+    AZURE_DI_KEY = st.text_input("AZURE_DI_KEY", AZURE_DI_KEY or "", type="password")
+
 if uploaded is not None:
     if not uploaded.name.lower().endswith(".pdf"):
         st.error("Please upload a PDF file.")
@@ -351,6 +365,6 @@ else:
 # FOOTER
 # =========================
 st.caption(
-    "Credits are session-scoped in this demo and locked for users. Only admins can refill using the PIN. "
+    "Credits are session-scoped in this demo and locked for users. Only admins can refill using the PIN from st.secrets. "
     f"Pricing: {PRICE_PER_PAGE_CREDITS} credits (₹{PRICE_PER_PAGE_CREDITS}) per page."
 )
