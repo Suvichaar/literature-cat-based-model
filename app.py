@@ -5,30 +5,22 @@ from typing import Optional, Any
 
 import streamlit as st
 
-# Azure Document Intelligence SDK
-try:
-    from azure.ai.documentintelligence import DocumentIntelligenceClient
-    from azure.core.credentials import AzureKeyCredential
-except Exception:
-    DocumentIntelligenceClient = None
-    AzureKeyCredential = None
-
-# Some SDK variants expose a typed request model
-try:
-    from azure.ai.documentintelligence.models import AnalyzeDocumentRequest  # type: ignore
-except Exception:
-    AnalyzeDocumentRequest = None  # type: ignore
-
-# DOCX writer
-from docx import Document
-from docx.shared import Pt
+# =========================
+# PAGE SETUP
+# =========================
+st.set_page_config(page_title="PDF → DOCX (Azure DI) + Credits", page_icon="📄", layout="wide")
+st.title("📄 PDF → DOCX with Azure Document Intelligence (Read)")
+st.caption("Upload a PDF → Azure DI (prebuilt-read) extracts text → Download a .docx • Pricing: ₹3 per page (3 credits)")
 
 # =========================
-# CONFIG / PRICING / SECRETS
+# PRICING / CONSTANTS
 # =========================
 CREDITS_START_BALANCE = 10_000
 PRICE_PER_PAGE_CREDITS = 3  # ₹3 == 3 credits
 
+# =========================
+# SECRETS / CONFIG
+# =========================
 def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     try:
         return st.secrets[key]  # type: ignore[attr-defined]
@@ -37,59 +29,114 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
 
 AZURE_DI_ENDPOINT = get_secret("AZURE_DI_ENDPOINT")
 AZURE_DI_KEY = get_secret("AZURE_DI_KEY")
+ADMIN_PIN = get_secret("ADMIN_PIN", "")  # optional; if empty, admin panel can still be used by leaving PIN blank
 
 # =========================
 # STATE INIT
 # =========================
+# Wallet (locked by default; only admin can refill)
 if "credits_balance" not in st.session_state:
     st.session_state.credits_balance = CREDITS_START_BALANCE
 
-# Tracks hashes of already-charged files to avoid double-charging on reruns
+# Prevent double-charging the same file during re-runs
 if "charged_docs" not in st.session_state:
     st.session_state.charged_docs = {}  # {file_hash: {"pages": int, "cost": int}}
 
+# Track last transaction
 if "last_txn" not in st.session_state:
-    st.session_state.last_txn = None    # {"file": str, "pages": int, "cost": int}
+    st.session_state.last_txn = None    # {"file": str, "pages": int, "cost": int, "ts": "..."}
+
+# Track admin auth
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
 
 # =========================
-# UI SHELL
+# AZURE SDK IMPORTS
 # =========================
-st.set_page_config(page_title="PDF → DOCX (Azure DI) + Credits", page_icon="📄", layout="wide")
-st.title("📄 PDF → DOCX with Azure Document Intelligence (Read)")
-st.caption("Upload a PDF → Azure DI (prebuilt-read) extracts text → Download a .docx • Credits: ₹3 per page")
+try:
+    from azure.ai.documentintelligence import DocumentIntelligenceClient
+    from azure.core.credentials import AzureKeyCredential
+except Exception:
+    DocumentIntelligenceClient = None
+    AzureKeyCredential = None
 
-# Sidebar: credits widget
+try:
+    from azure.ai.documentintelligence.models import AnalyzeDocumentRequest  # type: ignore
+except Exception:
+    AnalyzeDocumentRequest = None  # type: ignore
+
+from docx import Document
+from docx.shared import Pt
+from datetime import datetime
+
+# =========================
+# SIDEBAR: CREDITS + ADMIN
+# =========================
 with st.sidebar:
     st.subheader("💳 Credits")
     max_display = max(CREDITS_START_BALANCE, st.session_state.credits_balance)
-    pct = st.session_state.credits_balance / max_display
+    pct = min(max(st.session_state.credits_balance / float(max_display), 0.0), 1.0)
     st.progress(pct, text=f"Balance: {st.session_state.credits_balance} credits")
 
-    col_topup_1, col_topup_2 = st.columns([2,1])
-    with col_topup_1:
-        add_amt = st.number_input("Top-up amount (credits)", min_value=0, value=0, step=100, help="Demo top-up (1 credit = ₹1)")
-    with col_topup_2:
-        if st.button("Top-up"):
-            st.session_state.credits_balance += int(add_amt)
-            st.success(f"Topped up {int(add_amt)} credits.")
-    if st.button("Reset to 10,000"):
-        st.session_state.credits_balance = CREDITS_START_BALANCE
-        st.session_state.charged_docs.clear()
-        st.session_state.last_txn = None
-        st.info("Credits and charge history reset.")
-
+    # Last transaction (pretty card)
     if st.session_state.last_txn:
-        st.write("**Last transaction**")
-        st.json(st.session_state.last_txn, expanded=False)
+        txn = st.session_state.last_txn
+        st.markdown(
+            f"""
+            <div style="
+                background:#f5f8ff;
+                padding:12px;
+                border-radius:10px;
+                border:1px solid #d1e3ff;
+                margin-top:12px;
+            ">
+              <div style="font-weight:600;color:#1f4396;margin-bottom:6px;">🧾 Last Transaction</div>
+              <div style="font-size:13px;line-height:1.4;">
+                <div><b>File:</b> {txn['file']}</div>
+                <div><b>Pages:</b> {txn['pages']}</div>
+                <div><b>Credits:</b> {txn['cost']} (₹{txn['cost']})</div>
+                <div style="color:#666;"><b>Time:</b> {txn.get('ts','')}</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-# Main settings
+    # Admin panel (refill only here)
+    with st.expander("🔐 Admin Panel", expanded=False):
+        pin_entered = st.text_input("Enter Admin PIN", type="password")
+        if st.button("Login as Admin"):
+            if (ADMIN_PIN or "") == pin_entered:
+                st.session_state.is_admin = True
+                st.success("Admin login successful.")
+            else:
+                st.session_state.is_admin = False
+                st.error("Invalid PIN.")
+
+        if st.session_state.is_admin:
+            st.markdown("**Admin Controls**")
+            topup_amt = st.number_input("Top-up amount (credits)", min_value=1, value=100, step=50)
+            if st.button("Top-up Wallet"):
+                st.session_state.credits_balance += int(topup_amt)
+                st.success(f"Wallet topped up by {int(topup_amt)} credits.")
+
+            # Optional: Admin reset (credits + history)
+            if st.button("Reset Wallet & History"):
+                st.session_state.credits_balance = CREDITS_START_BALANCE
+                st.session_state.charged_docs.clear()
+                st.session_state.last_txn = None
+                st.success("Wallet reset to 10,000 and history cleared.")
+
+# =========================
+# SETTINGS / KEYS
+# =========================
 with st.expander("⚙️ Settings", expanded=False):
     add_page_breaks = st.checkbox("Insert page breaks between PDF pages", value=True)
     include_confidence = st.checkbox("Append line confidence (debug)", value=False)
 
-# If secrets are not set, allow manual entry (local/dev)
+# If secrets not configured, allow user to input for this run
 if not AZURE_DI_ENDPOINT or not AZURE_DI_KEY:
-    st.info("Azure DI endpoint/key not found in st.secrets. Enter them below for this session.")
+    st.info("Azure DI endpoint/key not found in st.secrets. Enter them for this session.")
     AZURE_DI_ENDPOINT = st.text_input("AZURE_DI_ENDPOINT", AZURE_DI_ENDPOINT or "", placeholder="https://<resourcename>.cognitiveservices.azure.com/")
     AZURE_DI_KEY = st.text_input("AZURE_DI_KEY", AZURE_DI_KEY or "", type="password")
 
@@ -101,7 +148,7 @@ uploaded = st.file_uploader("Upload a PDF", type=["pdf"], accept_multiple_files=
 @st.cache_resource(show_spinner=False)
 def make_client(endpoint: str, key: str):
     if DocumentIntelligenceClient is None or AzureKeyCredential is None:
-        raise RuntimeError("Azure SDK not installed. Run: pip install azure-ai-documentintelligence")
+        raise RuntimeError("Azure SDK not installed. Run: pip install azure-ai-documentintelligence python-docx")
     if not endpoint or not key:
         raise RuntimeError("Missing Azure DI endpoint or key.")
     return DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
@@ -113,11 +160,10 @@ def analyze_pdf_bytes(client: Any, pdf_bytes: bytes):
       A) document=pdf_bytes, content_type="application/pdf"         (newer SDKs)
       B) body={"base64Source": "..."}                               (older SDKs)
       C) body=AnalyzeDocumentRequest(bytes_source=pdf_bytes)        (some mid SDKs)
-    Raises the last error if all fail.
     """
     last_err = None
 
-    # A) Newer SDK signature
+    # A) Newer SDK
     try:
         poller = client.begin_analyze_document(
             model_id="prebuilt-read",
@@ -126,9 +172,9 @@ def analyze_pdf_bytes(client: Any, pdf_bytes: bytes):
         )
         return poller.result()
     except Exception as e:
-        last_err = e  # keep and try next
+        last_err = e
 
-    # B) Older SDK signature (base64Source in body)
+    # B) Older SDK (base64 body)
     try:
         b64 = base64.b64encode(pdf_bytes).decode("utf-8")
         poller = client.begin_analyze_document(
@@ -139,7 +185,7 @@ def analyze_pdf_bytes(client: Any, pdf_bytes: bytes):
     except Exception as e:
         last_err = e
 
-    # C) Typed request model (some versions)
+    # C) Typed request model
     try:
         if AnalyzeDocumentRequest is not None:
             req = AnalyzeDocumentRequest(bytes_source=pdf_bytes)  # type: ignore
@@ -155,9 +201,7 @@ def analyze_pdf_bytes(client: Any, pdf_bytes: bytes):
     raise last_err
 
 def result_to_docx_bytes(result, insert_page_breaks: bool = True, show_conf: bool = False) -> bytes:
-    """
-    Convert DI 'prebuilt-read' result into a simple DOCX.
-    """
+    """Convert DI 'prebuilt-read' result into a .docx."""
     doc = Document()
     style = doc.styles["Normal"]
     style.font.name = "Calibri"
@@ -181,6 +225,7 @@ def result_to_docx_bytes(result, insert_page_breaks: bool = True, show_conf: boo
                     if text.strip():
                         doc.add_paragraph(text)
             else:
+                # Fallback: paragraphs
                 paras = []
                 for p in getattr(result, "paragraphs", []) or []:
                     if getattr(p, "spans", None):
@@ -207,26 +252,29 @@ def charge_credits_once(file_id: str, pages: int, filename: str) -> int:
     Deduct credits exactly once per unique file hash.
     Returns the charged cost (0 if already charged).
     """
-    # Compute cost
     cost = pages * PRICE_PER_PAGE_CREDITS
 
     # Already charged?
     if file_id in st.session_state.charged_docs:
-        # No new charge
-        st.info(f"⚠️ This file was already processed earlier. No credits deducted again.")
+        st.info("⚠️ This file was already processed earlier. No credits deducted again.")
         return 0
 
-    # Check balance
+    # Sufficient balance?
     if st.session_state.credits_balance < cost:
         raise RuntimeError(
             f"Insufficient credits: need {cost}, have {st.session_state.credits_balance}. "
-            "Please top-up credits to proceed."
+            "Please ask an admin to top-up credits."
         )
 
     # Deduct and record
     st.session_state.credits_balance -= cost
     st.session_state.charged_docs[file_id] = {"pages": pages, "cost": cost}
-    st.session_state.last_txn = {"file": filename, "pages": pages, "cost": cost}
+    st.session_state.last_txn = {
+        "file": filename,
+        "pages": pages,
+        "cost": cost,
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
     return cost
 
 # =========================
@@ -236,7 +284,7 @@ if uploaded is not None:
     if not uploaded.name.lower().endswith(".pdf"):
         st.error("Please upload a PDF file.")
     else:
-        # Initialize client
+        # Make client
         try:
             client = make_client(AZURE_DI_ENDPOINT or "", AZURE_DI_KEY or "")
         except Exception as e:
@@ -248,7 +296,7 @@ if uploaded is not None:
             st.error("Uploaded file is empty. Please re-upload the PDF.")
             st.stop()
 
-        # Hash to prevent double-charging same file on reruns
+        # Hash to prevent double-charging on re-runs
         fid = file_hash(pdf_bytes)
 
         with st.spinner("Analyzing with Azure Document Intelligence (prebuilt-read)..."):
@@ -258,13 +306,13 @@ if uploaded is not None:
                 st.error(f"Azure DI analyze failed: {e}")
                 st.stop()
 
-        # Determine page count (prefer DI pages)
+        # Pages (prefer DI, fallback to 1)
         pages = len(getattr(result, "pages", []) or [])
         if pages <= 0:
-            pages = 1  # conservative fallback if pages unavailable
+            pages = 1
         st.success(f"Extracted text from **{pages} page(s)**.")
 
-        # Attempt to charge credits (once per unique file)
+        # Charge (only once per file hash)
         try:
             charged = charge_credits_once(fid, pages, uploaded.name)
             if charged > 0:
@@ -300,9 +348,9 @@ else:
     st.info("Upload a PDF to begin.")
 
 # =========================
-# FOOTER NOTE
+# FOOTER
 # =========================
 st.caption(
-    "Credits demo only (session-scoped). For production, store balances & transactions in a database per org/user. "
-    f"Pricing currently set to {PRICE_PER_PAGE_CREDITS} credits (₹{PRICE_PER_PAGE_CREDITS}) per page."
+    "Credits are session-scoped in this demo and locked for users. Only admins can refill using the PIN. "
+    f"Pricing: {PRICE_PER_PAGE_CREDITS} credits (₹{PRICE_PER_PAGE_CREDITS}) per page."
 )
