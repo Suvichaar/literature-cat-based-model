@@ -7,12 +7,6 @@ from typing import Dict, Any, Optional
 
 import streamlit as st
 
-# Optional: only if you want S3 upload
-try:
-    import boto3
-except Exception:
-    boto3 = None
-
 # Azure OpenAI SDK (v1+)
 try:
     from openai import AzureOpenAI
@@ -30,7 +24,10 @@ st.set_page_config(
 )
 
 st.title("🧮 Math → Animated HTML (KaTeX) + ✏️ TikZ (if helpful)")
-st.caption("Type or upload a problem → GPT returns concise LaTeX steps and (optionally) a TikZ diagram → we generate an animated .html you can preview/download.")
+st.caption(
+    "Type or upload a problem → GPT returns concise LaTeX steps and (optionally) a TikZ diagram → "
+    "we generate an animated HTML you can preview, download, or open in a new tab to see TikZ."
+)
 
 
 # =========================
@@ -47,14 +44,6 @@ AZURE_ENDPOINT     = get_secret("AZURE_ENDPOINT")
 AZURE_DEPLOYMENT   = get_secret("AZURE_DEPLOYMENT")          # e.g., "gpt-5-chat"
 AZURE_API_VERSION  = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
 
-AWS_ACCESS_KEY     = get_secret("AWS_ACCESS_KEY")
-AWS_SECRET_KEY     = get_secret("AWS_SECRET_KEY")
-AWS_REGION         = get_secret("AWS_REGION", "ap-south-1")
-AWS_BUCKET         = get_secret("AWS_BUCKET")
-S3_PREFIX          = get_secret("S3_PREFIX", "media")
-
-CDN_HTML_BASE      = get_secret("CDN_HTML_BASE", "")  # e.g., https://stories.example.org/
-
 
 # =========================
 # AZURE CLIENT
@@ -64,7 +53,7 @@ def get_azure_client():
         st.error("AzureOpenAI SDK not installed. Run:  pip install openai>=1.13.3")
         st.stop()
     if not (AZURE_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT):
-        st.error("Azure OpenAI secrets missing. Add to .streamlit/secrets.toml.")
+        st.error("Azure OpenAI secrets missing. Add them to .streamlit/secrets.toml.")
         st.stop()
     return AzureOpenAI(
         api_key=AZURE_API_KEY,
@@ -121,7 +110,8 @@ Constraints:
 - Use at most 6 steps.
 - Prefer aligned equations where helpful:
   "\\begin{{aligned}} ... \\end{{aligned}}"
-- If including TikZ, keep it minimal (axes, labeled points/curve)."""
+- If including TikZ, keep it minimal (axes, labeled points/curve).
+"""
 
 
 # =========================
@@ -141,7 +131,7 @@ def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
     )
     content = resp.choices[0].message.content
 
-    # Robust JSON parsing
+    # Robust JSON parsing (just in case)
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
@@ -162,15 +152,12 @@ def build_animated_katex_html(payload: Dict[str, Any]) -> str:
       - tikzjax for optional TikZ diagram (payload['tikz'])
     """
     safe_json = json.dumps(payload, ensure_ascii=False)
-    # Pull TikZ (if any) to place into a <script type="text/tikz"> tag for tikzjax
     tikz = (payload.get("tikz") or {})
     tikz_can = bool(tikz.get("can_draw"))
     tikz_src = tikz.get("source") or ""
 
-    # TikZ script block (only if available)
     tikz_block = ""
     if tikz_can and tikz_src.strip():
-        # tikzjax expects the raw \begin{tikzpicture}...\end{tikzpicture}
         tikz_block = f"""
 <section class="panel">
   <h2>TikZ Diagram</h2>
@@ -326,26 +313,6 @@ def save_html(html: str, filename: str) -> Path:
     return p
 
 
-def s3_upload(file_path: Path, key: str) -> Optional[str]:
-    if boto3 is None:
-        st.error("boto3 not installed. Run: pip install boto3")
-        return None
-    if not (AWS_BUCKET and (AWS_ACCESS_KEY and AWS_SECRET_KEY or True)):
-        st.error("Missing S3 config in secrets.")
-        return None
-
-    session = boto3.Session(
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-        region_name=AWS_REGION,
-    )
-    s3 = session.client("s3")
-    s3.upload_file(str(file_path), AWS_BUCKET, key, ExtraArgs={"ContentType": "text/html", "ACL": "public-read"})
-    if CDN_HTML_BASE:
-        return f"{CDN_HTML_BASE}{key}"
-    return f"s3://{AWS_BUCKET}/{key}"
-
-
 def make_slug(s: str, n: int = 36) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", s.strip()).strip("-").lower()
     return (s[:n] or "solution")
@@ -365,11 +332,6 @@ with st.sidebar:
         up = st.file_uploader("Upload a .txt file", type=["txt"])
         if up:
             problem_text = up.read().decode("utf-8")
-
-    st.markdown("---")
-    autoupload = st.checkbox("Upload result to S3 after generation", value=False)
-    prefix = st.text_input("S3 prefix (folder)", value=S3_PREFIX or "media")
-    st.caption("File is public-read. Ensure bucket CORS/ACL/policy allow it.")
 
 
 # =========================
@@ -397,12 +359,41 @@ if st.button("🚀 Solve & Generate Animated HTML", use_container_width=True):
 
     st.success(f"HTML written: {path}")
 
-    # Preview
+    # Preview HTML (TikZ may not render inside Streamlit iframe)
     with open(path, "r", encoding="utf-8") as f:
         html_str = f.read()
+
+    # --- Button to open HTML in a NEW TAB (outside sandbox) so TikZ renders ---
+    import base64
+
+    def open_in_new_tab_button(label: str, full_html: str):
+        b64 = base64.b64encode(full_html.encode("utf-8")).decode("ascii")
+        data_url = f"data:text/html;base64,{b64}"
+        st.markdown(
+            f'<a href="{data_url}" target="_blank" rel="noopener" '
+            f'style="display:inline-block;padding:10px 14px;border:1px solid #334;'
+            f'border-radius:8px;text-decoration:none;background:#101824;color:#eaf2f8;'
+            f'font-weight:600;margin-bottom:8px;">🔎 Open TikZ Preview (new tab)</a>',
+            unsafe_allow_html=True,
+        )
+
+    if '<script type="text/tikz">' in html_str:
+        st.info(
+            "TikZ uses a WebWorker/WASM which may be blocked in Streamlit's embedded preview. "
+            "Click the button below to open the full page in a new tab where TikZ will render."
+        )
+        open_in_new_tab_button("🔎 Open TikZ Preview (new tab)", html_str)
+
+        # Optional: show TikZ source for copy/paste
+        m = re.search(r'<script type="text/tikz">\s*([\s\S]*?)\s*</script>', html_str)
+        if m:
+            st.caption("TikZ source returned:")
+            st.code(m.group(1).strip(), language="latex")
+
+    # Embedded preview (steps/answer show; TikZ may not, depending on sandbox)
     st.components.v1.html(html_str, height=640, scrolling=True)
 
-    # Download button
+    # Download button (always works)
     st.download_button(
         "⬇️ Download HTML",
         data=html_str,
@@ -410,17 +401,3 @@ if st.button("🚀 Solve & Generate Animated HTML", use_container_width=True):
         mime="text/html",
         use_container_width=True,
     )
-
-    # S3 upload (optional)
-    if autoupload:
-        key = f"{(prefix or 'media').strip('/')}/{filename}"
-        with st.spinner(f"Uploading to s3://{AWS_BUCKET}/{key}"):
-            try:
-                url = s3_upload(path, key)
-            except Exception as e:
-                st.exception(e)
-                url = None
-        if url:
-            st.success("Uploaded!")
-            st.write("Public URL:")
-            st.code(url)
