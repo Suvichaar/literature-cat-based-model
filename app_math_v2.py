@@ -3,13 +3,9 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 import streamlit as st
-
-# plotting
-import numpy as np
-import matplotlib.pyplot as plt
 
 # Optional: only if you want S3 upload
 try:
@@ -28,13 +24,13 @@ except Exception:
 # UI CONFIG
 # =========================
 st.set_page_config(
-    page_title="Math → Animated Steps (KaTeX) + Graph",
+    page_title="Math → Animated Steps (KaTeX) + TikZ",
     page_icon="🧮",
     layout="wide",
 )
 
-st.title("🧮 Math → Animated HTML (KaTeX) + 📈 Graph (if possible)")
-st.caption("Type or upload a math problem → GPT returns concise LaTeX steps + optional graph data → we generate an animated .html file and plot a graph when appropriate.")
+st.title("🧮 Math → Animated HTML (KaTeX) + ✏️ TikZ (if helpful)")
+st.caption("Type or upload a problem → GPT returns concise LaTeX steps and (optionally) a TikZ diagram → we generate an animated .html you can preview/download.")
 
 
 # =========================
@@ -96,29 +92,25 @@ SCHEMA:
   ],
   "final_answer_latex": "...",
 
-  "graph": {
-    "can_plot": true|false,
-    "reason": "why graphable or not (1 sentence)",
-    "kind": "function|parametric|points|implicit",
-    "xlabel": "x (optional)",
-    "ylabel": "y (optional)",
-    "title": "short title (optional)",
-
-    // IMPORTANT: to avoid code execution by the client,
-    // you MUST include precomputed sample pairs to plot.
-    // For function/implicit: N pairs [x, y].
-    // For parametric: N pairs [x, y] in order of parameter.
-    // For points: N pairs [x, y] as given.
-    "samples": [[x1, y1], [x2, y2], ...]   // 20–300 points depending on smoothness
+  "tikz": {
+    "can_draw": true|false,
+    "reason": "why a small diagram helps (1 sentence)",
+    "source": "\\n\\begin{tikzpicture}[scale=1]\\n ... \\n\\end{tikzpicture}\\n"
   }
 }
 
 RULES:
 - Output must be valid JSON (no trailing commas).
 - Escape backslashes correctly in LaTeX.
-- If a graph is not meaningful, set can_plot=false and fill "reason".
-- NEVER return code to be executed; only numeric samples for plotting.
-- Prefer x range near the problem's natural domain.
+- If a diagram is not meaningful, set can_draw=false and fill "reason".
+- TikZ MUST compile standalone when wrapped in:
+    \\documentclass[tikz]{standalone}
+    \\usepackage{pgfplots}
+    \\pgfplotsset{compat=1.18}
+    \\begin{document}
+    <source>
+    \\end{document}
+- Prefer small, quick-to-compile diagrams (axes + 1–2 elements).
 """
 
 USER_PROMPT_TEMPLATE = """Problem:
@@ -129,7 +121,7 @@ Constraints:
 - Use at most 6 steps.
 - Prefer aligned equations where helpful:
   "\\begin{{aligned}} ... \\end{{aligned}}"
-"""
+- If including TikZ, keep it minimal (axes, labeled points/curve)."""
 
 
 # =========================
@@ -161,10 +153,36 @@ def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
 
 
 # =========================
-# HTML GENERATOR (KaTeX + Animation)
+# HTML GENERATOR (KaTeX + Animation + TikZ)
 # =========================
 def build_animated_katex_html(payload: Dict[str, Any]) -> str:
+    """
+    Embeds:
+      - KaTeX for math steps
+      - tikzjax for optional TikZ diagram (payload['tikz'])
+    """
     safe_json = json.dumps(payload, ensure_ascii=False)
+    # Pull TikZ (if any) to place into a <script type="text/tikz"> tag for tikzjax
+    tikz = (payload.get("tikz") or {})
+    tikz_can = bool(tikz.get("can_draw"))
+    tikz_src = tikz.get("source") or ""
+
+    # TikZ script block (only if available)
+    tikz_block = ""
+    if tikz_can and tikz_src.strip():
+        # tikzjax expects the raw \begin{tikzpicture}...\end{tikzpicture}
+        tikz_block = f"""
+<section class="panel">
+  <h2>TikZ Diagram</h2>
+  <div class="muted">{(tikz.get("reason") or "").strip()}</div>
+  <div class="tikz-wrap">
+    <script type="text/tikz">
+{tikz_src}
+    </script>
+  </div>
+</section>
+"""
+
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -173,6 +191,10 @@ def build_animated_katex_html(payload: Dict[str, Any]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+
+<!-- tikzjax: client-side TikZ→SVG rendering -->
+<script defer src="https://tikzjax.com/v1/tikzjax.js"></script>
+
 <style>
 :root{{ --bg:#0d1117; --card:#141b23; --text:#eaf2f8; --muted:#9fb6c2; --stroke:#223140; --accent:#7ee787; }}
 *{{box-sizing:border-box}}
@@ -182,7 +204,7 @@ h1{{margin:0 0 6px;font-size:20px}}
 h2{{margin:10px 0 8px}}
 small, .muted{{color:var(--muted)}}
 .wrap{{max-width:1100px;margin:18px auto 48px;padding:0 16px}}
-.panel{{background:var(--card);border:1px solid var(--stroke);border-radius:14px;padding:16px}}
+.panel{{background:var(--card);border:1px solid var(--stroke);border-radius:14px;padding:16px;margin-bottom:16px}}
 .controls .btn{{padding:10px 14px;border-radius:10px;border:1px solid var(--stroke);background:#101824;color:var(--text);cursor:pointer;font-weight:600}}
 .controls .btn:active{{transform:translateY(1px)}}
 .controls .btn.accent{{outline:2px solid var(--accent)}}
@@ -195,6 +217,7 @@ small, .muted{{color:var(--muted)}}
 .progress{{height:6px;border-radius:999px;background:#0e1520;border:1px solid var(--stroke);overflow:hidden;margin:10px 0 0}}
 .progress>div{{height:100%;width:0%;background:var(--accent);transition:width .3s ease}}
 .answer{{background:#0c151f;border:1px dashed var(--stroke);border-radius:12px;padding:12px;margin-top:14px}}
+.tikz-wrap svg{{width:100%; height:auto; background:#0b131d; border:1px solid var(--stroke); border-radius:12px; padding:8px}}
 </style>
 </head>
 <body>
@@ -204,7 +227,7 @@ small, .muted{{color:var(--muted)}}
 </header>
 
 <div class="wrap">
-  <div class="panel">
+  <section class="panel">
     <div class="controls">
       <button id="play" class="btn accent">▶ Play</button>
       <button id="step" class="btn">→ Step</button>
@@ -214,7 +237,9 @@ small, .muted{{color:var(--muted)}}
     <div class="progress"><div id="bar"></div></div>
     <ol id="steps" class="steps"></ol>
     <div class="answer" id="answer"></div>
-  </div>
+  </section>
+
+  {tikz_block}
 </div>
 
 <script>
@@ -327,60 +352,11 @@ def make_slug(s: str, n: int = 36) -> str:
 
 
 # =========================
-# GRAPH RENDERING
-# =========================
-def render_graph(payload: Dict[str, Any]) -> None:
-    """
-    Draw a graph if payload['graph'] says it's possible.
-    Expect structure:
-      graph = {
-        "can_plot": bool, "reason": str, "kind": "function|parametric|points|implicit",
-        "xlabel": "...", "ylabel": "...", "title": "...",
-        "samples": [[x,y], ...]
-      }
-    """
-    graph = payload.get("graph") or {}
-    can_plot = bool(graph.get("can_plot"))
-    reason = graph.get("reason", "")
-
-    st.subheader("📈 Graph")
-    if not can_plot:
-        msg = reason or "Graph not available for this question."
-        st.warning(f"Graph not available: {msg}")
-        return
-
-    samples = graph.get("samples") or []
-    if not samples:
-        st.warning("Graph not available: no sample data provided.")
-        return
-
-    # Convert to arrays
-    try:
-        arr = np.array(samples, dtype=float)
-        if arr.ndim != 2 or arr.shape[1] != 2:
-            raise ValueError("Invalid samples shape")
-    except Exception:
-        st.warning("Graph not available: invalid sample data.")
-        return
-
-    x, y = arr[:, 0], arr[:, 1]
-
-    fig, ax = plt.subplots()            # 1 chart only, no explicit colors
-    ax.plot(x, y)
-    ax.set_xlabel(graph.get("xlabel") or "x")
-    ax.set_ylabel(graph.get("ylabel") or "y")
-    ax.set_title(graph.get("title") or "Graph")
-    ax.grid(True)
-
-    st.pyplot(fig)
-
-
-# =========================
 # SIDEBAR / INPUTS
 # =========================
 with st.sidebar:
     st.header("Input")
-    default_example = "A thin ring (mass M, radius r) rotates with ω. Two masses m are attached diametrically. Find new angular velocity."
+    default_example = "Sketch y = x^2 - 1 and find its vertex and y-intercept."
     src = st.radio("How to supply a problem?", ["Type it", "Upload .txt"], index=0)
     problem_text = ""
     if src == "Type it":
@@ -399,64 +375,52 @@ with st.sidebar:
 # =========================
 # MAIN ACTION
 # =========================
-left, right = st.columns([0.38, 0.62])
+if st.button("🚀 Solve & Generate Animated HTML", use_container_width=True):
+    if not problem_text.strip():
+        st.error("Please provide a problem.")
+        st.stop()
 
-with left:
-    if st.button("🚀 Solve & Generate Animated HTML", use_container_width=True):
-        if not problem_text.strip():
-            st.error("Please provide a problem.")
+    with st.spinner("Asking GPT for LaTeX steps + (optional) TikZ..."):
+        try:
+            result = call_gpt_solve(problem_text)
+        except Exception as e:
+            st.exception(e)
             st.stop()
 
-        with st.spinner("Asking GPT for LaTeX steps + graphability..."):
+    st.success("Got result from GPT!")
+
+    with st.spinner("Building animated KaTeX + TikZ HTML..."):
+        html = build_animated_katex_html(result)
+        stem = make_slug(result.get("topic") or "math") + "-" + str(int(time.time()))
+        filename = f"{stem}.html"
+        path = save_html(html, filename)
+
+    st.success(f"HTML written: {path}")
+
+    # Preview
+    with open(path, "r", encoding="utf-8") as f:
+        html_str = f.read()
+    st.components.v1.html(html_str, height=640, scrolling=True)
+
+    # Download button
+    st.download_button(
+        "⬇️ Download HTML",
+        data=html_str,
+        file_name=filename,
+        mime="text/html",
+        use_container_width=True,
+    )
+
+    # S3 upload (optional)
+    if autoupload:
+        key = f"{(prefix or 'media').strip('/')}/{filename}"
+        with st.spinner(f"Uploading to s3://{AWS_BUCKET}/{key}"):
             try:
-                result = call_gpt_solve(problem_text)
+                url = s3_upload(path, key)
             except Exception as e:
                 st.exception(e)
-                st.stop()
-
-        st.success("Got result from GPT!")
-
-        with st.spinner("Building animated KaTeX HTML..."):
-            html = build_animated_katex_html(result)
-            stem = make_slug(result.get("topic") or "math") + "-" + str(int(time.time()))
-            filename = f"{stem}.html"
-            path = save_html(html, filename)
-
-        st.success(f"HTML written: {path}")
-
-        # Preview
-        with open(path, "r", encoding="utf-8") as f:
-            html_str = f.read()
-        st.components.v1.html(html_str, height=560, scrolling=True)
-
-        # Download button
-        st.download_button(
-            "⬇️ Download HTML",
-            data=html_str,
-            file_name=filename,
-            mime="text/html",
-            use_container_width=True,
-        )
-
-        # S3 upload (optional)
-        if autoupload:
-            key = f"{(prefix or 'media').strip('/')}/{filename}"
-            with st.spinner(f"Uploading to s3://{AWS_BUCKET}/{key}"):
-                try:
-                    url = s3_upload(path, key)
-                except Exception as e:
-                    st.exception(e)
-                    url = None
-            if url:
-                st.success("Uploaded!")
-                st.write("Public URL:")
-                st.code(url)
-
-        # store for right column
-        st.session_state["last_payload"] = result
-
-with right:
-    if "last_payload" in st.session_state:
-        render_graph(st.session_state["last_payload"])
-    else:
-        st.info("Run a problem to see the graph area. If the problem is not graphable, you’ll see a friendly notice.")
+                url = None
+        if url:
+            st.success("Uploaded!")
+            st.write("Public URL:")
+            st.code(url)
