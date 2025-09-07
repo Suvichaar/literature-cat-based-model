@@ -1,10 +1,13 @@
-# app.py
 import json
 import re
 import time
+import base64
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 import streamlit as st
 
 # Azure OpenAI SDK (v1+)
@@ -18,15 +21,15 @@ except Exception:
 # UI CONFIG
 # =========================
 st.set_page_config(
-    page_title="Math → Animated Steps (KaTeX) + TikZ",
+    page_title="Math → Animated Steps (KaTeX + TikZ + GIF)",
     page_icon="🧮",
     layout="wide",
 )
 
-st.title("🧮 Math → Animated HTML (KaTeX) + ✏️ TikZ (if helpful)")
+st.title("🧮 Math → Animated HTML (KaTeX) + TikZ + 🎞 GIF")
 st.caption(
-    "Type or upload a problem → GPT returns concise LaTeX steps and (optionally) a TikZ diagram → "
-    "we generate an animated HTML you can preview, download, or open in a new tab to see TikZ."
+    "Type a math/physics problem → GPT returns LaTeX steps + TikZ → "
+    "We generate animated KaTeX HTML + TikZ diagram + GIF fallback."
 )
 
 
@@ -39,10 +42,11 @@ def get_secret(key: str, default=None):
     except Exception:
         return default
 
-AZURE_API_KEY      = get_secret("AZURE_API_KEY")
-AZURE_ENDPOINT     = get_secret("AZURE_ENDPOINT")
-AZURE_DEPLOYMENT   = get_secret("AZURE_DEPLOYMENT")          # e.g., "gpt-5-chat"
-AZURE_API_VERSION  = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
+
+AZURE_API_KEY = get_secret("AZURE_API_KEY")
+AZURE_ENDPOINT = get_secret("AZURE_ENDPOINT")
+AZURE_DEPLOYMENT = get_secret("AZURE_DEPLOYMENT")
+AZURE_API_VERSION = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
 
 
 # =========================
@@ -50,10 +54,10 @@ AZURE_API_VERSION  = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
 # =========================
 def get_azure_client():
     if AzureOpenAI is None:
-        st.error("AzureOpenAI SDK not installed. Run:  pip install openai>=1.13.3")
+        st.error("AzureOpenAI SDK not installed. Run: pip install openai>=1.13.3")
         st.stop()
     if not (AZURE_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT):
-        st.error("Azure OpenAI secrets missing. Add them to .streamlit/secrets.toml.")
+        st.error("Azure OpenAI secrets missing in .streamlit/secrets.toml")
         st.stop()
     return AzureOpenAI(
         api_key=AZURE_API_KEY,
@@ -67,50 +71,39 @@ def get_azure_client():
 # =========================
 SYSTEM_PROMPT = """You are a helpful math/physics tutor.
 
-Return a concise, correct solution as STRICT JSON ONLY (no prose outside JSON).
-Use LaTeX for math (KaTeX-compatible). Keep steps short (1–2 lines each).
+Return a concise, correct solution as STRICT JSON ONLY.
+Use LaTeX for math. Keep steps short.
 
 SCHEMA:
 {
-  "problem": "<original problem text>",
-  "topic": "algebra|calculus|trig|mechanics|... (one word if possible)",
+  "problem": "<original problem>",
+  "topic": "algebra|calculus|trig|mechanics|...",
   "steps": [
     {"title": "Given", "latex": "..."},
     {"title": "Rule", "latex": "..."},
     {"title": "Apply", "latex": "..."}
   ],
   "final_answer_latex": "...",
-
   "tikz": {
     "can_draw": true|false,
-    "reason": "why a small diagram helps (1 sentence)",
+    "reason": "why a diagram helps",
     "source": "\\n\\begin{tikzpicture}[scale=1]\\n ... \\n\\end{tikzpicture}\\n"
   }
 }
 
 RULES:
-- Output must be valid JSON (no trailing commas).
-- Escape backslashes correctly in LaTeX.
-- If a diagram is not meaningful, set can_draw=false and fill "reason".
-- TikZ MUST compile standalone when wrapped in:
-    \\documentclass[tikz]{standalone}
-    \\usepackage{pgfplots}
-    \\pgfplotsset{compat=1.18}
-    \\begin{document}
-    <source>
-    \\end{document}
-- Prefer small, quick-to-compile diagrams (axes + 1–2 elements).
+- Strict JSON only.
+- Escape backslashes properly.
+- Keep TikZ minimal and compile-ready.
 """
 
 USER_PROMPT_TEMPLATE = """Problem:
 {problem}
 
 Constraints:
-- Format JSON exactly as described. No extra keys.
-- Use at most 6 steps.
-- Prefer aligned equations where helpful:
-  "\\begin{{aligned}} ... \\end{{aligned}}"
-- If including TikZ, keep it minimal (axes, labeled points/curve).
+- Follow the JSON schema exactly.
+- Max 6 steps.
+- Use minimal TikZ if helpful (axes, labeled points, or one curve).
 """
 
 
@@ -119,7 +112,6 @@ Constraints:
 # =========================
 def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
     client = get_azure_client()
-
     resp = client.chat.completions.create(
         model=AZURE_DEPLOYMENT,
         temperature=0.2,
@@ -130,27 +122,71 @@ def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
         response_format={"type": "json_object"},
     )
     content = resp.choices[0].message.content
-
-    # Robust JSON parsing (just in case)
     try:
-        data = json.loads(content)
+        return json.loads(content)
     except json.JSONDecodeError:
         match = re.search(r"\{[\s\S]*\}\s*$", content)
         if not match:
             raise ValueError("Model did not return JSON.")
-        data = json.loads(match.group(0))
-    return data
+        return json.loads(match.group(0))
 
 
 # =========================
-# HTML GENERATOR (KaTeX + Animation + TikZ)
+# GIF GENERATOR (TikZ → Approximation)
+# =========================
+def generate_gif_from_tikz(tikz_src: str, out_path: Path):
+    """
+    Approximate TikZ function plots by detecting y = f(x).
+    If unsupported TikZ, returns None.
+    """
+    match = re.search(r"y\s*=\s*([x0-9\+\-\*\/\^\(\)\s]+)", tikz_src)
+    if not match:
+        return None
+    expr = match.group(1)
+
+    # Safe evaluation
+    def safe_eval(x):
+        try:
+            return eval(expr.replace("^", "**"), {"x": x, "np": np})
+        except Exception:
+            return None
+
+    x = np.linspace(-3, 3, 200)
+    y = safe_eval(x)
+    if y is None:
+        return None
+
+    fig, ax = plt.subplots()
+    ax.set_xlim(min(x), max(x))
+    ax.set_ylim(min(y) - 1, max(y) + 1)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(f"Plot: y = {expr}")
+
+    ax.axhline(0, color="gray")
+    ax.axvline(0, color="gray")
+
+    (line,) = ax.plot([], [], lw=2)
+    frames = range(1, len(x) + 1, 4)
+
+    def init():
+        line.set_data([], [])
+        return (line,)
+
+    def update(i):
+        line.set_data(x[:i], y[:i])
+        return (line,)
+
+    anim = FuncAnimation(fig, update, frames=frames, init_func=init, blit=True, interval=30)
+    anim.save(out_path, writer=PillowWriter(fps=24))
+    plt.close(fig)
+    return out_path
+
+
+# =========================
+# HTML GENERATOR (KaTeX + TikZ)
 # =========================
 def build_animated_katex_html(payload: Dict[str, Any]) -> str:
-    """
-    Embeds:
-      - KaTeX for math steps
-      - tikzjax for optional TikZ diagram (payload['tikz'])
-    """
     safe_json = json.dumps(payload, ensure_ascii=False)
     tikz = (payload.get("tikz") or {})
     tikz_can = bool(tikz.get("can_draw"))
@@ -178,127 +214,19 @@ def build_animated_katex_html(payload: Dict[str, Any]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-
-<!-- tikzjax: client-side TikZ→SVG rendering -->
 <script defer src="https://tikzjax.com/v1/tikzjax.js"></script>
-
-<style>
-:root{{ --bg:#0d1117; --card:#141b23; --text:#eaf2f8; --muted:#9fb6c2; --stroke:#223140; --accent:#7ee787; }}
-*{{box-sizing:border-box}}
-body{{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Roboto,Ubuntu,sans-serif}}
-header{{padding:16px 20px;border-bottom:1px solid var(--stroke)}}
-h1{{margin:0 0 6px;font-size:20px}}
-h2{{margin:10px 0 8px}}
-small, .muted{{color:var(--muted)}}
-.wrap{{max-width:1100px;margin:18px auto 48px;padding:0 16px}}
-.panel{{background:var(--card);border:1px solid var(--stroke);border-radius:14px;padding:16px;margin-bottom:16px}}
-.controls .btn{{padding:10px 14px;border-radius:10px;border:1px solid var(--stroke);background:#101824;color:var(--text);cursor:pointer;font-weight:600}}
-.controls .btn:active{{transform:translateY(1px)}}
-.controls .btn.accent{{outline:2px solid var(--accent)}}
-.steps{{list-style:none;padding:0;margin:16px 0 0}}
-.step{{background:#0f1620;border:1px solid var(--stroke);border-radius:12px;padding:14px;margin:10px 0;overflow:hidden;opacity:0;transform:translateY(10px);transition:opacity .35s ease, transform .35s ease}}
-.step.show{{opacity:1;transform:none}}
-.math{{min-height:36px;max-width:100%;overflow-x:auto}}
-.katex-display{{margin:.2rem 0}}
-.katex-display>.katex{{white-space:normal}}
-.progress{{height:6px;border-radius:999px;background:#0e1520;border:1px solid var(--stroke);overflow:hidden;margin:10px 0 0}}
-.progress>div{{height:100%;width:0%;background:var(--accent);transition:width .3s ease}}
-.answer{{background:#0c151f;border:1px dashed var(--stroke);border-radius:12px;padding:12px;margin-top:14px}}
-.tikz-wrap svg{{width:100%; height:auto; background:#0b131d; border:1px solid var(--stroke); border-radius:12px; padding:8px}}
-</style>
 </head>
 <body>
-<header>
-  <h1>Solution — Animated Steps</h1>
-  <div class="muted" id="meta"></div>
-</header>
-
-<div class="wrap">
-  <section class="panel">
-    <div class="controls">
-      <button id="play" class="btn accent">▶ Play</button>
-      <button id="step" class="btn">→ Step</button>
-      <button id="pause" class="btn">⏸ Pause</button>
-      <button id="reset" class="btn">↺ Reset</button>
-    </div>
-    <div class="progress"><div id="bar"></div></div>
-    <ol id="steps" class="steps"></ol>
-    <div class="answer" id="answer"></div>
-  </section>
-
-  {tikz_block}
-</div>
-
+<h1>Solution Steps</h1>
+<div id="meta"></div>
+<ol id="steps"></ol>
+<div id="answer"></div>
+{tikz_block}
 <script>
 const payload = {safe_json};
-
-function katexRender(el, tex, display=true) {{
-  try {{ katex.render(tex, el, {{throwOnError:false, displayMode:display}}); }}
-  catch(e) {{ el.textContent = tex; }}
-}}
-
-const list = document.getElementById('steps');
-const bar  = document.getElementById('bar');
-const ans  = document.getElementById('answer');
-const meta = document.getElementById('meta');
-
-meta.textContent = "Topic: " + (payload.topic||"") + "   •   Problem: " + (payload.problem||"");
-
-let i=-1, playing=false;
-
-function build() {{
-  list.innerHTML = "";
-  ans.innerHTML = "";
-  (payload.steps||[]).forEach((s, idx) => {{
-    const li = document.createElement('li');
-    li.className = 'step';
-    li.innerHTML = `<h2>${{s.title||('Step '+(idx+1))}}</h2><div class="math"></div>`;
-    list.appendChild(li);
-    s._node = li.querySelector('.math');
-  }});
-  i=-1; updateBar();
-  ans.innerHTML = "<small>Final answer</small><div id='ansmath'></div>";
-}}
-
-function updateBar() {{
-  const pct = Math.max(0, (i+1)/((payload.steps||[]).length)) * 100;
-  bar.style.width = pct + '%';
-}}
-
-function next() {{
-  if (!payload.steps || i >= payload.steps.length-1) return;
-  i++;
-  const s = payload.steps[i];
-  s._node.parentElement.classList.add('show');
-  katexRender(s._node, s.latex || "", true);
-  updateBar();
-  if (i === payload.steps.length-1) {{
-    const el = document.getElementById('ansmath');
-    katexRender(el, payload.final_answer_latex || "", true);
-  }}
-}}
-
-document.getElementById('play').onclick  = () => {{
-  if (playing) return;
-  playing = true;
-  (function loop() {{
-    if (!playing) return;
-    if (i < (payload.steps||[]).length-1) {{
-      next(); setTimeout(loop, 700);
-    }} else {{
-      playing = false;
-    }}
-  }})();
-}};
-document.getElementById('step').onclick  = () => {{ playing=false; next(); }};
-document.getElementById('pause').onclick = () => {{ playing=false; }};
-document.getElementById('reset').onclick = () => {{ playing=false; build(); }};
-
-build();
 </script>
 </body>
-</html>
-"""
+</html>"""
     return html
 
 
@@ -319,7 +247,7 @@ def make_slug(s: str, n: int = 36) -> str:
 
 
 # =========================
-# SIDEBAR / INPUTS
+# SIDEBAR
 # =========================
 with st.sidebar:
     st.header("Input")
@@ -342,7 +270,7 @@ if st.button("🚀 Solve & Generate Animated HTML", use_container_width=True):
         st.error("Please provide a problem.")
         st.stop()
 
-    with st.spinner("Asking GPT for LaTeX steps + (optional) TikZ..."):
+    with st.spinner("Asking GPT for LaTeX + TikZ..."):
         try:
             result = call_gpt_solve(problem_text)
         except Exception as e:
@@ -351,53 +279,52 @@ if st.button("🚀 Solve & Generate Animated HTML", use_container_width=True):
 
     st.success("Got result from GPT!")
 
-    with st.spinner("Building animated KaTeX + TikZ HTML..."):
+    with st.spinner("Building HTML..."):
         html = build_animated_katex_html(result)
         stem = make_slug(result.get("topic") or "math") + "-" + str(int(time.time()))
         filename = f"{stem}.html"
         path = save_html(html, filename)
 
-    st.success(f"HTML written: {path}")
-
-    # Preview HTML (TikZ may not render inside Streamlit iframe)
     with open(path, "r", encoding="utf-8") as f:
         html_str = f.read()
 
-    # --- Button to open HTML in a NEW TAB (outside sandbox) so TikZ renders ---
-    import base64
+    # ---- Show GIF if TikZ is present ----
+    tikz = result.get("tikz", {})
+    if tikz.get("can_draw") and tikz.get("source"):
+        st.subheader("🎞 TikZ Approximation GIF")
+        gif_path = Path("animated_exports") / f"{stem}.gif"
+        gif = generate_gif_from_tikz(tikz["source"], gif_path)
+        if gif:
+            st.image(str(gif), caption="TikZ-based Animated GIF")
+            st.download_button(
+                "⬇️ Download GIF",
+                data=open(gif, "rb").read(),
+                file_name=gif_path.name,
+                mime="image/gif",
+            )
+        else:
+            st.warning("TikZ diagram detected, but GIF approximation failed.")
 
-    def open_in_new_tab_button(label: str, full_html: str):
-        b64 = base64.b64encode(full_html.encode("utf-8")).decode("ascii")
-        data_url = f"data:text/html;base64,{b64}"
-        st.markdown(
-            f'<a href="{data_url}" target="_blank" rel="noopener" '
-            f'style="display:inline-block;padding:10px 14px;border:1px solid #334;'
-            f'border-radius:8px;text-decoration:none;background:#101824;color:#eaf2f8;'
-            f'font-weight:600;margin-bottom:8px;">🔎 Open TikZ Preview (new tab)</a>',
-            unsafe_allow_html=True,
-        )
-
+    # ---- Open TikZ in New Tab ----
     if '<script type="text/tikz">' in html_str:
-        st.info(
-            "TikZ uses a WebWorker/WASM which may be blocked in Streamlit's embedded preview. "
-            "Click the button below to open the full page in a new tab where TikZ will render."
-        )
-        open_in_new_tab_button("🔎 Open TikZ Preview (new tab)", html_str)
+        st.info("TikZ may not render in Streamlit preview → Open in a new tab:")
+        b64 = base64.b64encode(html_str.encode("utf-8")).decode("ascii")
+        data_url = f"data:text/html;base64,{b64}"
+        st.markdown(f"[🔎 Open TikZ Preview in New Tab]({data_url})", unsafe_allow_html=True)
 
-        # Optional: show TikZ source for copy/paste
+        # Show TikZ source code
         m = re.search(r'<script type="text/tikz">\s*([\s\S]*?)\s*</script>', html_str)
         if m:
-            st.caption("TikZ source returned:")
+            st.caption("TikZ source:")
             st.code(m.group(1).strip(), language="latex")
 
-    # Embedded preview (steps/answer show; TikZ may not, depending on sandbox)
+    # HTML Preview (steps only, TikZ may not render)
     st.components.v1.html(html_str, height=640, scrolling=True)
 
-    # Download button (always works)
+    # Download HTML
     st.download_button(
         "⬇️ Download HTML",
         data=html_str,
         file_name=filename,
         mime="text/html",
-        use_container_width=True,
     )
