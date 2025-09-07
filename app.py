@@ -2,40 +2,34 @@
 import json
 import re
 import time
-import base64
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import streamlit as st
 
-# Optional: only if you want S3 upload
-try:
-    import boto3
-except Exception:
-    boto3 = None
-
-# Azure OpenAI SDK (v1+)
+# Azure OpenAI SDK
 try:
     from openai import AzureOpenAI
 except Exception:
     AzureOpenAI = None
 
-
 # =========================
 # UI CONFIG
 # =========================
 st.set_page_config(
-    page_title="Math → Animated Steps (KaTeX)",
+    page_title="Math → Animated Steps (KaTeX) + Optional Graph",
     page_icon="🧮",
     layout="wide",
 )
 
-st.title("🧮 Math → Animated HTML (KaTeX)")
-st.caption("Type or upload a math problem → GPT returns concise LaTeX steps → we generate an animated .html file you can preview, download, or upload to S3.")
-
+st.title("🧮 Math → Animated HTML (KaTeX) + 🖼️ Optional Matplotlib Graph")
+st.caption(
+    "Type or upload a problem → GPT returns concise LaTeX steps → we build KaTeX HTML. "
+    "If you tick the checkbox, we also parse and plot y = f(x) as a PNG."
+)
 
 # =========================
-# READ SECRETS / CONFIG
+# READ SECRETS
 # =========================
 def get_secret(key: str, default=None):
     try:
@@ -43,26 +37,20 @@ def get_secret(key: str, default=None):
     except Exception:
         return default
 
-AZURE_API_KEY      = get_secret("AZURE_API_KEY")
-AZURE_ENDPOINT     = get_secret("AZURE_ENDPOINT")
-AZURE_DEPLOYMENT   = get_secret("AZURE_DEPLOYMENT")          # e.g., "gpt-5-chat"
-AZURE_API_VERSION  = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
+AZURE_API_KEY = get_secret("AZURE_API_KEY")
+AZURE_ENDPOINT = get_secret("AZURE_ENDPOINT")
+AZURE_DEPLOYMENT = get_secret("AZURE_DEPLOYMENT")
+AZURE_API_VERSION = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
 
-AWS_ACCESS_KEY     = get_secret("AWS_ACCESS_KEY")
-AWS_SECRET_KEY     = get_secret("AWS_SECRET_KEY")
-AWS_REGION         = get_secret("AWS_REGION", "ap-south-1")
-AWS_BUCKET         = get_secret("AWS_BUCKET")
-S3_PREFIX          = get_secret("S3_PREFIX", "media")
-
-CDN_HTML_BASE      = get_secret("CDN_HTML_BASE", "")  # e.g., https://stories.example.org/
-
-# Initialize Azure client (lazy)
+# =========================
+# AZURE CLIENT
+# =========================
 def get_azure_client():
     if AzureOpenAI is None:
-        st.error("AzureOpenAI SDK not installed. Run:  pip install openai>=1.13.3")
+        st.error("AzureOpenAI SDK missing. Install: pip install openai>=1.13.3")
         st.stop()
     if not (AZURE_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT):
-        st.error("Azure OpenAI secrets missing. Add to .streamlit/secrets.toml.")
+        st.error("Missing Azure secrets in .streamlit/secrets.toml")
         st.stop()
     return AzureOpenAI(
         api_key=AZURE_API_KEY,
@@ -70,50 +58,26 @@ def get_azure_client():
         api_version=AZURE_API_VERSION,
     )
 
-
 # =========================
-# PROMPTS
+# GPT PROMPTS
 # =========================
-SYSTEM_PROMPT = """You are a helpful math tutor.
-Return a concise, correct solution as STRICT JSON ONLY (no prose before/after).
-Use LaTeX for math (compatible with KaTeX). Keep steps short (1-2 lines each).
-Schema:
-{
-  "problem": "<original problem text>",
-  "topic": "algebra|calculus|trig|... (one word if possible)",
-  "steps": [
-    {"title": "Given", "latex": "..."},
-    {"title": "Rule", "latex": "..."},
-    {"title": "Apply", "latex": "..."}
-  ],
-  "final_answer_latex": "..."
-}
-
-Rules:
-- Output must be valid JSON.
-- Escape backslashes correctly.
-- Latex must compile in KaTeX (no \begin{proof} etc.).
-- If ambiguous, make a reasonable assumption and proceed.
-"""
+SYSTEM_PROMPT = """You are a helpful math/physics tutor.
+Return STRICT JSON ONLY (no prose).
+Use KaTeX-compatible LaTeX. Use ≤6 steps.
+For Matplotlib rendering, prefer mathtext-safe LaTeX (avoid \\text{}, aligned, eqnarray; prefer \\mathrm{})."""
 
 USER_PROMPT_TEMPLATE = """Problem:
 {problem}
-
 Constraints:
-- Format JSON exactly as described. No extra keys.
-- Use at most 6 steps.
-- Prefer aligned equations where helpful:
-  "\\begin{{aligned}} ... \\end{{aligned}}"
+- JSON only, ≤6 steps
+- Prefer mathtext-safe LaTeX
 """
-
 
 # =========================
 # GPT CALL
 # =========================
 def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
     client = get_azure_client()
-
-    # Chat Completions
     resp = client.chat.completions.create(
         model=AZURE_DEPLOYMENT,
         temperature=0.2,
@@ -124,41 +88,26 @@ def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
         response_format={"type": "json_object"},
     )
     content = resp.choices[0].message.content
-
-    # Robust JSON parsing
     try:
-        data = json.loads(content)
+        return json.loads(content)
     except json.JSONDecodeError:
-        # Fallback: extract last {...}
         match = re.search(r"\{[\s\S]*\}\s*$", content)
         if not match:
-            raise ValueError("Model did not return JSON.")
-        data = json.loads(match.group(0))
-    return data
-
+            raise ValueError("Model returned invalid JSON")
+        return json.loads(match.group(0))
 
 # =========================
-# HTML GENERATOR (KaTeX + Animation)
+# HTML BUILDER (KaTeX Animated)
 # =========================
 def build_animated_katex_html(payload: Dict[str, Any]) -> str:
-    """
-    payload: {
-      "problem": "...",
-      "topic": "...",
-      "steps": [{"title": "...", "latex": "..."}, ...],
-      "final_answer_latex": "..."
-    }
-    """
     safe_json = json.dumps(payload, ensure_ascii=False)
-
-    html = f"""<!doctype html>
-<html lang="en">
+    return f"""<!doctype html>
+<html lang='en'>
 <head>
-<meta charset="utf-8">
-<title>Solution — Animated Steps</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<meta charset='utf-8'>
+<title>Solution Steps</title>
+<link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css'>
+<script defer src='https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js'></script>
 <style>
 :root{{ --bg:#0d1117; --card:#141b23; --text:#eaf2f8; --muted:#9fb6c2; --stroke:#223140; --accent:#7ee787; }}
 *{{box-sizing:border-box}}
@@ -186,99 +135,153 @@ small, .muted{{color:var(--muted)}}
 <body>
 <header>
   <h1>Solution — Animated Steps</h1>
-  <div class="muted" id="meta"></div>
+  <div class='muted' id='meta'></div>
 </header>
-
-<div class="wrap">
-  <div class="panel">
-    <div class="controls">
-      <button id="play" class="btn accent">▶ Play</button>
-      <button id="step" class="btn">→ Step</button>
-      <button id="pause" class="btn">⏸ Pause</button>
-      <button id="reset" class="btn">↺ Reset</button>
+<div class='wrap'>
+  <section class='panel'>
+    <div class='controls'>
+      <button id='play' class='btn accent'>▶ Play</button>
+      <button id='step' class='btn'>→ Step</button>
+      <button id='pause' class='btn'>⏸ Pause</button>
+      <button id='reset' class='btn'>↺ Reset</button>
     </div>
-    <div class="progress"><div id="bar"></div></div>
-    <ol id="steps" class="steps"></ol>
-    <div class="answer" id="answer"></div>
-  </div>
+    <div class='progress'><div id='bar'></div></div>
+    <ol id='steps' class='steps'></ol>
+    <div class='answer' id='answer'></div>
+  </section>
 </div>
-
 <script>
 const payload = {safe_json};
-
-function katexRender(el, tex, display=true) {{
-  try {{ katex.render(tex, el, {{throwOnError:false, displayMode:display}}); }}
-  catch(e) {{ el.textContent = tex; }}
-}}
-
-const list = document.getElementById('steps');
-const bar  = document.getElementById('bar');
-const ans  = document.getElementById('answer');
-const meta = document.getElementById('meta');
-
-meta.textContent = "Topic: " + (payload.topic||"") + "   •   Problem: " + (payload.problem||"");
-
+function katexRender(el, tex, display=true){
+  try{ katex.render(tex, el, {throwOnError:false, displayMode:display}); }catch(e){ el.textContent = tex; }
+}
+const list=document.getElementById('steps');
+const bar=document.getElementById('bar');
+const ans=document.getElementById('answer');
+const meta=document.getElementById('meta');
+meta.textContent = "Topic: "+(payload.topic||"")+"   •   Problem: "+(payload.problem||"");
 let i=-1, playing=false;
-
-function build() {{
-  list.innerHTML = "";
-  ans.innerHTML = "";
-  (payload.steps||[]).forEach((s, idx) => {{
-    const li = document.createElement('li');
-    li.className = 'step';
-    li.innerHTML = `<h2>${{s.title||('Step '+(idx+1))}}</h2><div class="math"></div>`;
+function build(){
+  list.innerHTML=""; ans.innerHTML="";
+  (payload.steps||[]).forEach((s,idx)=>{
+    const li=document.createElement('li');
+    li.className='step';
+    li.innerHTML=`<h2>${s.title||('Step '+(idx+1))}</h2><div class='math'></div>`;
     list.appendChild(li);
-    s._node = li.querySelector('.math');
-  }});
+    s._node=li.querySelector('.math');
+  });
   i=-1; updateBar();
   ans.innerHTML = "<small>Final answer</small><div id='ansmath'></div>";
-}}
-
-function updateBar() {{
-  const pct = Math.max(0, (i+1)/((payload.steps||[]).length)) * 100;
-  bar.style.width = pct + '%';
-}}
-
-function next() {{
-  if (!payload.steps || i >= payload.steps.length-1) return;
-  i++;
-  const s = payload.steps[i];
-  s._node.parentElement.classList.add('show');
-  katexRender(s._node, s.latex || "", true);
-  updateBar();
-  if (i === payload.steps.length-1) {{
-    // show final answer
-    const el = document.getElementById('ansmath');
-    katexRender(el, payload.final_answer_latex || "", true);
-  }}
-}}
-
-document.getElementById('play').onclick  = () => {{
-  if (playing) return;
-  playing = true;
-  (function loop() {{
-    if (!playing) return;
-    if (i < (payload.steps||[]).length-1) {{
-      next(); setTimeout(loop, 700);
-    }} else {{
-      playing = false;
-    }}
-  }})();
-}};
-document.getElementById('step').onclick  = () => {{ playing=false; next(); }};
-document.getElementById('pause').onclick = () => {{ playing=false; }};
-document.getElementById('reset').onclick = () => {{ playing=false; build(); }};
-
+}
+function updateBar(){ bar.style.width = Math.max(0,(i+1)/((payload.steps||[]).length))*100+'%'; }
+function next(){
+  if(!payload.steps||i>=(payload.steps.length-1)) return;
+  i++; const s=payload.steps[i]; s._node.parentElement.classList.add('show');
+  katexRender(s._node, s.latex||"", true); updateBar();
+  if(i===(payload.steps.length-1)) katexRender(document.getElementById('ansmath'), payload.final_answer_latex||"", true);
+}
+function playLoop(){ if(!playing) return; if(i<(payload.steps||[]).length-1){ next(); setTimeout(playLoop,700);} else {playing=false;} }
+play.onclick=()=>{ if(!playing){ playing=true; playLoop(); } };
+step.onclick=()=>{ playing=false; next(); };
+pause.onclick=()=>{ playing=false; } };
+reset.onclick=()=>{ playing=false; build(); };
 build();
 </script>
 </body>
-</html>
-"""
-    return html
-
+</html>"""
 
 # =========================
-# UTIL
+# GRAPH PARSING & PLOTTING (Optional PNG)
+# =========================
+
+def guess_equation(text: str) -> Optional[str]:
+    """Best-effort grab of 'y = ...' (or f(x)=...) from the prompt text."""
+    if not text:
+        return None
+    m = re.search(r"y\s*=\s*([^\n;]+)", text, flags=re.IGNORECASE)
+    if m:
+        rhs = m.group(1).strip()
+        return f"y = {rhs}"
+    m = re.search(r"f\s*\(\s*x\s*\)\s*=\s*([^\n;]+)", text, flags=re.IGNORECASE)
+    if m:
+        rhs = m.group(1).strip()
+        return f"y = {rhs}"
+    # Last resort: a bare expression containing 'x' (e.g., x^2 - 1)
+    m = re.search(r"(?<![A-Za-z0-9_])(x[^\n;]+)", text)
+    if m:
+        cand = m.group(1).strip()
+        return f"y = {cand}"
+    return None
+
+
+def _to_numpy_expr(expr: str) -> str:
+    """Convert a math string into a numpy-evaluable Python expression."""
+    s = expr.strip()
+    # take RHS if 'y = ...'
+    if re.match(r"^y\s*=", s, flags=re.IGNORECASE):
+        s = s.split("=", 1)[1]
+    # basic normalizations
+    s = s.replace("^", "**")
+    s = s.replace("ln", "log")
+    # implicit multiplication: 2x -> 2*x, 2(x+1)->2*(x+1)
+    s = re.sub(r"(?<=\d)\s*(?=x)", "*", s)
+    s = re.sub(r"(?<=\d)\s*\(", "*(", s)
+    # Allow absolute value via abs()
+    s = s.replace("|x|", "abs(x)")
+    return s
+
+
+def plot_equation_png(equation: str, outfile: Path, x_min: float = -5.0, x_max: float = 5.0, points: int = 1000) -> Path:
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    if x_max <= x_min:
+        raise ValueError("x_max must be greater than x_min")
+    expr = _to_numpy_expr(equation)
+
+    # Safe eval environment
+    x = np.linspace(x_min, x_max, int(points))
+    env = {
+        "x": x,
+        "pi": np.pi,
+        "e": np.e,
+        "sin": np.sin,
+        "cos": np.cos,
+        "tan": np.tan,
+        "sinh": np.sinh,
+        "cosh": np.cosh,
+        "tanh": np.tanh,
+        "arcsin": np.arcsin,
+        "arccos": np.arccos,
+        "arctan": np.arctan,
+        "exp": np.exp,
+        "log": np.log,
+        "sqrt": np.sqrt,
+        "abs": np.abs,
+    }
+
+    try:
+        y = eval(expr, {"__builtins__": {}}, env)
+    except Exception as e:
+        raise ValueError(f"Could not parse/evaluate the equation: {equation}\nDetails: {e}")
+
+    if hasattr(y, "shape") and y.shape == x.shape:
+        fig, ax = plt.subplots(figsize=(7, 5), dpi=150)
+        ax.plot(x, y)
+        ax.axhline(0, lw=1)
+        ax.axvline(0, lw=1)
+        ax.grid(True)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title(equation)
+        fig.savefig(outfile, bbox_inches="tight")
+        plt.close(fig)
+        return outfile
+    else:
+        raise ValueError("Evaluated expression did not produce a y(x) array.")
+
+# =========================
+# UTILS
 # =========================
 def save_html(html: str, filename: str) -> Path:
     out = Path("animated_exports")
@@ -287,109 +290,84 @@ def save_html(html: str, filename: str) -> Path:
     p.write_text(html, encoding="utf-8")
     return p
 
-
-def s3_upload(file_path: Path, key: str) -> Optional[str]:
-    if boto3 is None:
-        st.error("boto3 not installed. Run: pip install boto3")
-        return None
-    if not (AWS_BUCKET and (AWS_ACCESS_KEY and AWS_SECRET_KEY or True)):
-        st.error("Missing S3 config in secrets.")
-        return None
-
-    session = boto3.Session(
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-        region_name=AWS_REGION,
-    )
-    s3 = session.client("s3")
-    s3.upload_file(str(file_path), AWS_BUCKET, key, ExtraArgs={"ContentType": "text/html", "ACL": "public-read"})
-    if CDN_HTML_BASE:
-        return f"{CDN_HTML_BASE}{key}"
-    return f"s3://{AWS_BUCKET}/{key}"
-
-
 def make_slug(s: str, n: int = 36) -> str:
-    s = re.sub(r"[^a-zA-Z0-9]+", "-", s.strip()).strip("-").lower()
-    return (s[:n] or "solution")
-
+    return re.sub(r"[^a-zA-Z0-9]+", "-", s.strip()).strip("-").lower()[:n]
 
 # =========================
-# SIDEBAR / INPUTS
+# SIDEBAR
 # =========================
 with st.sidebar:
     st.header("Input")
-    default_example = "Given a = 5 m/s^2 and m = 10 kg, find F using Newton's Second Law."
+    default_example = "Sketch y = x^2 - 1 and find its vertex and y-intercept."
     src = st.radio("How to supply a problem?", ["Type it", "Upload .txt"], index=0)
     problem_text = ""
     if src == "Type it":
-        problem_text = st.text_area("Enter a math problem", value=default_example, height=140)
+        problem_text = st.text_area("Enter a math/physics problem", value=default_example, height=140)
     else:
         up = st.file_uploader("Upload a .txt file", type=["txt"])
         if up:
             problem_text = up.read().decode("utf-8")
 
-    st.markdown("---")
-    autoupload = st.checkbox("Upload result to S3 after generation", value=False)
-    prefix = st.text_input("S3 prefix (folder)", value=S3_PREFIX or "media")
-    st.caption("File is public-read. Ensure bucket CORS/ACL/policy allow it.")
-
+    st.divider()
+    st.subheader("Optional: Graph (PNG)")
+    want_graph = st.checkbox("Create graph (y = f(x)) as PNG", value=False)
+    eq_guess = guess_equation(problem_text) or ""
+    equation_to_plot = ""
+    x_min = -5.0
+    x_max = 5.0
+    points = 1000
+    if want_graph:
+        equation_to_plot = st.text_input("Equation (e.g., y = x^2 - 1)", value=eq_guess)
+        cols = st.columns(3)
+        with cols[0]:
+            x_min = st.number_input("x_min", value=-5.0)
+        with cols[1]:
+            x_max = st.number_input("x_max", value=5.0)
+        with cols[2]:
+            points = st.number_input("points", min_value=100, max_value=5000, value=1000, step=100)
 
 # =========================
-# MAIN ACTION
+# MAIN
 # =========================
-colA, colB = st.columns([1, 1])
-with colA:
-    if st.button("🚀 Solve with GPT & Build Animated HTML", use_container_width=True):
-        if not problem_text.strip():
-            st.error("Please provide a problem.")
+if st.button("🚀 Solve & Generate (HTML + optional Graph PNG)", use_container_width=True):
+    if not problem_text.strip():
+        st.error("Please provide a problem.")
+        st.stop()
+
+    with st.spinner("Asking GPT for LaTeX steps..."):
+        try:
+            result = call_gpt_solve(problem_text)
+        except Exception as e:
+            st.exception(e)
             st.stop()
 
-        with st.spinner("Asking GPT for concise LaTeX steps..."):
-            try:
-                result = call_gpt_solve(problem_text)
-            except Exception as e:
-                st.exception(e)
-                st.stop()
+    st.success("Got result from GPT!")
 
-        st.success("Got steps from GPT!")
-        st.json(result)
+    with st.spinner("Building HTML..."):
+        html = build_animated_katex_html(result)
+        stem = make_slug(result.get("topic") or "math") + "-" + str(int(time.time()))
+        html_filename = f"{stem}.html"
+        html_path = save_html(html, html_filename)
 
-        with st.spinner("Generating animated KaTeX HTML..."):
-            html = build_animated_katex_html(result)
-            # file naming
-            stem = make_slug(result.get("topic") or "math") + "-" + str(int(time.time()))
-            filename = f"{stem}.html"
-            path = save_html(html, filename)
+    with open(html_path, "r", encoding="utf-8") as f:
+        html_str = f.read()
+    st.components.v1.html(html_str, height=640, scrolling=True)
+    st.download_button("⬇️ Download HTML", data=html_str, file_name=html_filename, mime="text/html", use_container_width=True)
 
-        st.success(f"HTML written: {path}")
-
-        # Preview
-        with open(path, "r", encoding="utf-8") as f:
-            html_str = f.read()
-        st.components.v1.html(html_str, height=600, scrolling=True)
-
-        # Download button
-        st.download_button(
-            "⬇️ Download HTML",
-            data=html_str,
-            file_name=filename,
-            mime="text/html",
-            use_container_width=True,
-        )
-
-        # S3 upload (optional)
-        if autoupload:
-            key = f"{(prefix or 'media').strip('/')}/{filename}"
-            with st.spinner(f"Uploading to s3://{AWS_BUCKET}/{key}"):
+    if want_graph:
+        if not equation_to_plot.strip():
+            st.warning("Graphing enabled, but no equation provided. Please enter something like 'y = x^2 - 1'.")
+        else:
+            with st.spinner("Plotting equation as PNG..."):
+                out_dir = Path("animated_exports"); out_dir.mkdir(exist_ok=True)
+                png_path = out_dir / (stem + "-graph.png")
                 try:
-                    url = s3_upload(path, key)
+                    plot_equation_png(equation_to_plot, png_path, float(x_min), float(x_max), int(points))
+                    st.image(str(png_path), caption=f"Graph: {equation_to_plot}", use_container_width=True)
+                    st.download_button("⬇️ Download Graph PNG", data=png_path.read_bytes(), file_name=png_path.name, mime="image/png", use_container_width=True)
                 except Exception as e:
+                    st.warning("Could not plot the equation. See details below.")
                     st.exception(e)
-                    url = None
-            if url:
-                st.success("Uploaded!")
-                st.write("Public URL:")
-                st.code(url)
 
-with colB:
-    st.info("Tips:\n- Keep problems concise.\n- For integrals/derivatives, state variables and constants clearly.\n- You can regenerate if you want a different step granularity.")
+    with st.expander("Show raw JSON from GPT"):
+        st.code(json.dumps(result, indent=2, ensure_ascii=False), language="json")
