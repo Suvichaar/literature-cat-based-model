@@ -17,14 +17,14 @@ except Exception:
 # UI CONFIG
 # -------------------------
 st.set_page_config(
-    page_title="Math → Animated Steps (KaTeX) + Matplotlib GIF",
+    page_title="Math → Animated Steps (KaTeX) + Matplotlib PNG",
     page_icon="🧮",
     layout="wide",
 )
 
-st.title("🧮 Math → Animated HTML (KaTeX) + 🖼️ Matplotlib GIF")
+st.title("🧮 Math → Animated HTML (KaTeX) + 🖼️ Matplotlib PNG")
 st.caption(
-    "Type or upload a problem → GPT returns concise LaTeX steps → we build (a) an animated KaTeX HTML and (b) a Matplotlib GIF of the steps."
+    "Type or upload a problem → GPT returns concise LaTeX steps → we build (a) an animated KaTeX HTML and (b) a Matplotlib PNG of the steps."
 )
 
 # -------------------------
@@ -88,7 +88,7 @@ RULES:
 - Escape backslashes correctly in LaTeX.
 - If a diagram is not meaningful, set can_draw=false and fill "reason".
 - Prefer small, quick steps (<= 6).
-- For lines intended for the Matplotlib GIF, prefer mathtext-safe LaTeX:
+- For lines intended for the Matplotlib PNG, prefer mathtext-safe LaTeX:
   avoid aligned/align/eqnarray; avoid \\text{...} (use \\mathrm{...});
   prefer \\Rightarrow over \\implies.
 """
@@ -99,7 +99,7 @@ USER_PROMPT_TEMPLATE = """Problem:
 Constraints:
 - Format JSON exactly as described. No extra keys.
 - Use at most 6 steps.
-- Keep equations simple and single-line when possible (GIF uses Matplotlib mathtext).
+- Keep equations simple and single-line when possible (PNG uses Matplotlib mathtext).
 """
 
 # -------------------------
@@ -134,7 +134,7 @@ def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
 # -------------------------
 def build_animated_katex_html(payload: Dict[str, Any]) -> str:
     """
-    KaTeX-only animated stepper (TikZ removed). Use alongside a Matplotlib GIF for visuals.
+    KaTeX-only animated stepper (TikZ removed). Use alongside a Matplotlib PNG for visuals.
     """
     safe_json = json.dumps(payload, ensure_ascii=False)
 
@@ -261,21 +261,15 @@ build();
     return html
 
 # -------------------------
-# MATPLOTLIB GIF (steps reveal)
+# MATPLOTLIB PNG (single image)
 # -------------------------
-def build_steps_gif(payload: Dict[str, Any], outfile: Path, fps: int = 2) -> Path:
-    """Create a simple GIF using matplotlib where each frame reveals one more step.
-    Uses matplotlib's mathtext to render LaTeX-like expressions.
-    Includes a sanitizer + safe fallback so unsupported LaTeX won't crash rendering.
+def build_steps_png(payload: Dict[str, Any], outfile: Path) -> Path:
+    """Render a single PNG showing the problem, revealed steps, and final answer.
+    Uses matplotlib's mathtext; includes a LaTeX sanitizer + fallback to plain text.
     """
     import io
-    try:
-        from PIL import Image
-        import imageio.v2 as imageio
-        import matplotlib.pyplot as plt
-        import re as _re
-    except Exception as imp_err:
-        raise RuntimeError("GIF dependencies missing. Please install: pip install matplotlib imageio Pillow") from imp_err
+    import matplotlib.pyplot as plt
+    import re as _re
 
     def _sanitize_for_mathtext(tex: str) -> str:
         if not isinstance(tex, str):
@@ -313,52 +307,37 @@ def build_steps_gif(payload: Dict[str, Any], outfile: Path, fps: int = 2) -> Pat
     problem = payload.get("problem") or "Problem"
     final_ans = payload.get("final_answer_latex") or ""
 
-    frames = []
-    total = len(steps)
+    # Render all steps on one static canvas
+    fig = plt.figure(figsize=(8, 10), dpi=150)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis('off')
 
-    for k in range(total + 1):  # +1 to include final-answer frame
-        fig = plt.figure(figsize=(8, 6), dpi=150)
-        ax = fig.add_axes([0, 0, 1, 1])
-        ax.axis('off')
+    y = 0.96
+    ax.text(0.05, y, "Solution Overview", fontsize=16, weight='bold', transform=ax.transAxes)
+    y -= 0.06
+    ax.text(0.05, y, f"Problem: {problem}", fontsize=11, transform=ax.transAxes, wrap=True)
+    y -= 0.04
+    ax.plot([0.05, 0.95], [y, y], lw=1.2)
+    y -= 0.04
 
-        y = 0.95
-        ax.text(0.05, y, "Solution Steps", fontsize=14, weight='bold', transform=ax.transAxes)
+    for i, step in enumerate(steps, start=1):
+        title = step.get('title') or f"Step {i}"
+        latex = step.get('latex') or ""
+        ax.text(0.05, y, f"{title}", fontsize=12, weight='bold', transform=ax.transAxes)
+        y -= 0.045
+        _draw_math_or_plain(ax, 0.08, y, latex, fontsize=12, transform=ax.transAxes)
+        y -= 0.11
+
+    if final_ans:
+        y -= 0.02
+        ax.plot([0.05, 0.95], [y, y], lw=1.2)
         y -= 0.06
-        ax.text(0.05, y, f"Problem: {problem}", fontsize=10, transform=ax.transAxes, wrap=True)
-        y -= 0.06
-        ax.text(0.05, y, f"Showing {min(k, total)} / {total} step(s)", fontsize=9, transform=ax.transAxes)
-        y -= 0.04
-        ax.plot([0.05, 0.95], [y, y], lw=1)
-        y -= 0.04
+        ax.text(0.05, y, "Final Answer:", fontsize=13, weight='bold', transform=ax.transAxes)
+        y -= 0.055
+        _draw_math_or_plain(ax, 0.08, y, final_ans, fontsize=13, transform=ax.transAxes)
 
-        # Render revealed steps
-        for i in range(min(k, total)):
-            step = steps[i]
-            title = step.get('title') or f"Step {i+1}"
-            latex = step.get('latex') or ""
-            ax.text(0.05, y, f"{title}", fontsize=11, weight='bold', transform=ax.transAxes)
-            y -= 0.05
-            _draw_math_or_plain(ax, 0.08, y, latex, fontsize=11, transform=ax.transAxes)
-            y -= 0.12
-
-        # Final answer on last frame
-        if k == total and final_ans:
-            y -= 0.02
-            ax.plot([0.05, 0.95], [y, y], lw=1)
-            y -= 0.06
-            ax.text(0.05, y, "Final Answer:", fontsize=12, weight='bold', transform=ax.transAxes)
-            y -= 0.06
-            _draw_math_or_plain(ax, 0.08, y, final_ans, fontsize=12, transform=ax.transAxes)
-
-        # Convert figure to PIL Image
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
-        plt.close(fig)
-        buf.seek(0)
-        frames.append(Image.open(buf).convert('P', palette=Image.ADAPTIVE))
-
-    # Save GIF
-    imageio.mimsave(outfile, frames, duration=1.0 / max(1, fps))
+    fig.savefig(outfile, format="png", bbox_inches="tight")
+    plt.close(fig)
     return outfile
 
 # -------------------------
@@ -394,7 +373,7 @@ with st.sidebar:
 # -------------------------
 # MAIN ACTION
 # -------------------------
-if st.button("🚀 Solve & Generate (HTML + GIF)", use_container_width=True):
+if st.button("🚀 Solve & Generate (HTML + PNG)", use_container_width=True):
     if not problem_text.strip():
         st.error("Please provide a problem.")
         st.stop()
@@ -431,25 +410,23 @@ if st.button("🚀 Solve & Generate (HTML + GIF)", use_container_width=True):
         use_container_width=True,
     )
 
-    # ---------- Build Matplotlib GIF
-    with st.spinner("Rendering steps GIF with Matplotlib..."):
+    # ---------- Build Matplotlib PNG
+    with st.spinner("Rendering steps PNG with Matplotlib..."):
         out_dir = Path("animated_exports")
         out_dir.mkdir(exist_ok=True)
-        gif_path = out_dir / (stem + ".gif")
+        png_path = out_dir / (stem + ".png")
         try:
-            build_steps_gif(result, gif_path, fps=2)
-            st.image(str(gif_path), caption="Steps GIF (Matplotlib)", use_container_width=True)
+            build_steps_png(result, png_path)
+            st.image(str(png_path), caption="Steps PNG (Matplotlib)", use_container_width=True)
             st.download_button(
-                "⬇️ Download GIF",
-                data=gif_path.read_bytes(),
-                file_name=gif_path.name,
-                mime="image/gif",
+                "⬇️ Download PNG",
+                data=png_path.read_bytes(),
+                file_name=png_path.name,
+                mime="image/png",
                 use_container_width=True,
             )
-        except RuntimeError as dep_err:
-            st.warning(str(dep_err))
         except Exception as e:
-            st.warning("Could not render GIF. Showing error below.")
+            st.warning("Could not render PNG. Showing error below.")
             st.exception(e)
 
     # Optional: Show raw JSON
