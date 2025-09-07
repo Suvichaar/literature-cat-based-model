@@ -3,7 +3,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, List
 
 import streamlit as st
 
@@ -88,6 +88,9 @@ RULES:
 - Escape backslashes correctly in LaTeX.
 - If a diagram is not meaningful, set can_draw=false and fill "reason".
 - Prefer small, quick steps (<= 6).
+- For lines intended for the Matplotlib GIF, prefer mathtext-safe LaTeX:
+  avoid aligned/align/eqnarray; avoid \\text{...} (use \\mathrm{...});
+  prefer \\Rightarrow over \\implies.
 """
 
 USER_PROMPT_TEMPLATE = """Problem:
@@ -96,8 +99,7 @@ USER_PROMPT_TEMPLATE = """Problem:
 Constraints:
 - Format JSON exactly as described. No extra keys.
 - Use at most 6 steps.
-- Prefer aligned equations where helpful:
-  "\\begin{{aligned}} ... \\end{{aligned}}"
+- Keep equations simple and single-line when possible (GIF uses Matplotlib mathtext).
 """
 
 # -------------------------
@@ -137,13 +139,13 @@ def build_animated_katex_html(payload: Dict[str, Any]) -> str:
     safe_json = json.dumps(payload, ensure_ascii=False)
 
     html = f"""<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-<meta charset=\"utf-8\">
+<meta charset="utf-8">
 <title>Solution — Animated Steps</title>
-<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\">
-<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <style>
 :root{{ --bg:#0d1117; --card:#141b23; --text:#eaf2f8; --muted:#9fb6c2; --stroke:#223140; --accent:#7ee787; }}
 *{{box-sizing:border-box}}
@@ -171,20 +173,20 @@ small, .muted{{color:var(--muted)}}
 <body>
 <header>
   <h1>Solution — Animated Steps</h1>
-  <div class=\"muted\" id=\"meta\"></div>
+  <div class="muted" id="meta"></div>
 </header>
 
-<div class=\"wrap\">
-  <section class=\"panel\">
-    <div class=\"controls\">
-      <button id=\"play\" class=\"btn accent\">▶ Play</button>
-      <button id=\"step\" class=\"btn\">→ Step</button>
-      <button id=\"pause\" class=\"btn\">⏸ Pause</button>
-      <button id=\"reset\" class=\"btn\">↺ Reset</button>
+<div class="wrap">
+  <section class="panel">
+    <div class="controls">
+      <button id="play" class="btn accent">▶ Play</button>
+      <button id="step" class="btn">→ Step</button>
+      <button id="pause" class="btn">⏸ Pause</button>
+      <button id="reset" class="btn">↺ Reset</button>
     </div>
-    <div class=\"progress\"><div id=\"bar\"></div></div>
-    <ol id=\"steps\" class=\"steps\"></ol>
-    <div class=\"answer\" id=\"answer\"></div>
+    <div class="progress"><div id="bar"></div></div>
+    <ol id="steps" class="steps"></ol>
+    <div class="answer" id="answer"></div>
   </section>
 </div>
 
@@ -237,18 +239,16 @@ function next() {{
   }}
 }}
 
-document.getElementById('play').onclick  = () => {{
-  if (playing) return;
-  playing = true;
-  (function loop() {{
-    if (!playing) return;
-    if (i < (payload.steps||[]).length-1) {{
-      next(); setTimeout(loop, 700);
-    }} else {{
-      playing = false;
-    }}
-  }})();
-}};
+function playLoop() {{
+  if (!playing) return;
+  if (i < (payload.steps||[]).length-1) {{
+    next(); setTimeout(playLoop, 700);
+  }} else {{
+    playing = false;
+  }}
+}}
+
+document.getElementById('play').onclick  = () => {{ if (!playing) {{ playing=true; playLoop(); }} }};
 document.getElementById('step').onclick  = () => {{ playing=false; next(); }};
 document.getElementById('pause').onclick = () => {{ playing=false; }};
 document.getElementById('reset').onclick = () => {{ playing=false; build(); }};
@@ -265,12 +265,49 @@ build();
 # -------------------------
 def build_steps_gif(payload: Dict[str, Any], outfile: Path, fps: int = 2) -> Path:
     """Create a simple GIF using matplotlib where each frame reveals one more step.
-    Uses matplotlib's mathtext to render LaTeX-style expressions.
+    Uses matplotlib's mathtext to render LaTeX-like expressions.
+    Includes a sanitizer + safe fallback so unsupported LaTeX won't crash rendering.
     """
     import io
-    from PIL import Image
-    import imageio.v2 as imageio
-    import matplotlib.pyplot as plt
+    try:
+        from PIL import Image
+        import imageio.v2 as imageio
+        import matplotlib.pyplot as plt
+        import re as _re
+    except Exception as imp_err:
+        raise RuntimeError("GIF dependencies missing. Please install: pip install matplotlib imageio Pillow") from imp_err
+
+    def _sanitize_for_mathtext(tex: str) -> str:
+        if not isinstance(tex, str):
+            return ""
+        s = tex.strip()
+        # strip surrounding $...$ if any
+        if s.startswith("$") and s.endswith("$"):
+            s = s[1:-1].strip()
+        # remove unsupported environments
+        s = _re.sub(r"\\begin\{aligned\}|\\end\{aligned\}", "", s)
+        s = _re.sub(r"\\begin\{align\*?\}|\\end\{align\*?\}", "", s)
+        s = _re.sub(r"\\begin\{eqnarray\*?\}|\\end\{eqnarray\*?\}", "", s)
+        # latex line breaks → real newlines
+        s = s.replace(r"\\", "\n")
+        # \text{...} → \mathrm{...}
+        s = _re.sub(r"\\text\{([^}]*)\}", r"\\mathrm{\1}", s)
+        # common aliases not supported by mathtext
+        s = s.replace(r"\implies", r"\Rightarrow")
+        s = s.replace(r"\iff", r"\Leftrightarrow")
+        s = s.replace(r"\land", r"\wedge").replace(r"\lor", r"\vee")
+        s = s.replace(r"\operatorname{", r"\mathrm{")
+        # guard against stray ^ or _ at end
+        s = _re.sub(r"\^(\s|$)", "", s)
+        s = _re.sub(r"_(\s|$)", "", s)
+        return s
+
+    def _draw_math_or_plain(ax, x, y, s, **kwargs):
+        tex = _sanitize_for_mathtext(s)
+        try:
+            ax.text(x, y, f"$ {tex} $", **kwargs)
+        except Exception:
+            ax.text(x, y, tex, **kwargs)
 
     steps: List[Dict[str, str]] = payload.get("steps") or []
     problem = payload.get("problem") or "Problem"
@@ -301,9 +338,8 @@ def build_steps_gif(payload: Dict[str, Any], outfile: Path, fps: int = 2) -> Pat
             latex = step.get('latex') or ""
             ax.text(0.05, y, f"{title}", fontsize=11, weight='bold', transform=ax.transAxes)
             y -= 0.05
-            # mathtext; use raw string-like $...$
-            ax.text(0.08, y, f"$ {latex} $", fontsize=11, transform=ax.transAxes, wrap=True)
-            y -= 0.09
+            _draw_math_or_plain(ax, 0.08, y, latex, fontsize=11, transform=ax.transAxes)
+            y -= 0.12
 
         # Final answer on last frame
         if k == total and final_ans:
@@ -312,7 +348,7 @@ def build_steps_gif(payload: Dict[str, Any], outfile: Path, fps: int = 2) -> Pat
             y -= 0.06
             ax.text(0.05, y, "Final Answer:", fontsize=12, weight='bold', transform=ax.transAxes)
             y -= 0.06
-            ax.text(0.08, y, f"$ {final_ans} $", fontsize=12, transform=ax.transAxes, wrap=True)
+            _draw_math_or_plain(ax, 0.08, y, final_ans, fontsize=12, transform=ax.transAxes)
 
         # Convert figure to PIL Image
         buf = io.BytesIO()
@@ -322,8 +358,7 @@ def build_steps_gif(payload: Dict[str, Any], outfile: Path, fps: int = 2) -> Pat
         frames.append(Image.open(buf).convert('P', palette=Image.ADAPTIVE))
 
     # Save GIF
-    duration = 1.0 / max(1, fps)
-    imageio.mimsave(outfile, frames, duration=duration)
+    imageio.mimsave(outfile, frames, duration=1.0 / max(1, fps))
     return outfile
 
 # -------------------------
@@ -396,7 +431,7 @@ if st.button("🚀 Solve & Generate (HTML + GIF)", use_container_width=True):
         use_container_width=True,
     )
 
-    # ---------- Build Matplotlib GIF (no TikZ)
+    # ---------- Build Matplotlib GIF
     with st.spinner("Rendering steps GIF with Matplotlib..."):
         out_dir = Path("animated_exports")
         out_dir.mkdir(exist_ok=True)
@@ -404,7 +439,6 @@ if st.button("🚀 Solve & Generate (HTML + GIF)", use_container_width=True):
         try:
             build_steps_gif(result, gif_path, fps=2)
             st.image(str(gif_path), caption="Steps GIF (Matplotlib)", use_container_width=True)
-            # Provide download
             st.download_button(
                 "⬇️ Download GIF",
                 data=gif_path.read_bytes(),
@@ -412,6 +446,8 @@ if st.button("🚀 Solve & Generate (HTML + GIF)", use_container_width=True):
                 mime="image/gif",
                 use_container_width=True,
             )
+        except RuntimeError as dep_err:
+            st.warning(str(dep_err))
         except Exception as e:
             st.warning("Could not render GIF. Showing error below.")
             st.exception(e)
