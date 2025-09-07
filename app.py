@@ -3,19 +3,19 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import streamlit as st
 
-# Azure OpenAI SDK (v1+)
+# Azure OpenAI SDK
 try:
     from openai import AzureOpenAI
 except Exception:
     AzureOpenAI = None
 
-# -------------------------
+# =========================
 # UI CONFIG
-# -------------------------
+# =========================
 st.set_page_config(
     page_title="Math → Animated Steps (KaTeX) + Matplotlib PNG",
     page_icon="🧮",
@@ -24,32 +24,33 @@ st.set_page_config(
 
 st.title("🧮 Math → Animated HTML (KaTeX) + 🖼️ Matplotlib PNG")
 st.caption(
-    "Type or upload a problem → GPT returns concise LaTeX steps → we build (a) an animated KaTeX HTML and (b) a Matplotlib PNG of the steps."
+    "Type or upload a problem → GPT returns concise LaTeX steps → we build KaTeX HTML. "
+    "Optionally, tick the box to plot y = f(x) as a Matplotlib PNG."
 )
 
-# -------------------------
-# READ SECRETS / CONFIG
-# -------------------------
+# =========================
+# READ SECRETS
+# =========================
 def get_secret(key: str, default=None):
     try:
         return st.secrets[key]
     except Exception:
         return default
 
-AZURE_API_KEY      = get_secret("AZURE_API_KEY")
-AZURE_ENDPOINT     = get_secret("AZURE_ENDPOINT")
-AZURE_DEPLOYMENT   = get_secret("AZURE_DEPLOYMENT")          # e.g., "gpt-5-chat"
-AZURE_API_VERSION  = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
+AZURE_API_KEY = get_secret("AZURE_API_KEY")
+AZURE_ENDPOINT = get_secret("AZURE_ENDPOINT")
+AZURE_DEPLOYMENT = get_secret("AZURE_DEPLOYMENT")
+AZURE_API_VERSION = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
 
-# -------------------------
+# =========================
 # AZURE CLIENT
-# -------------------------
+# =========================
 def get_azure_client():
     if AzureOpenAI is None:
-        st.error("AzureOpenAI SDK not installed. Run:  pip install openai>=1.13.3")
+        st.error("AzureOpenAI SDK missing. Install: pip install openai>=1.13.3")
         st.stop()
     if not (AZURE_API_KEY and AZURE_ENDPOINT and AZURE_DEPLOYMENT):
-        st.error("Azure OpenAI secrets missing. Add them to .streamlit/secrets.toml.")
+        st.error("Missing Azure secrets in .streamlit/secrets.toml")
         st.stop()
     return AzureOpenAI(
         api_key=AZURE_API_KEY,
@@ -57,57 +58,26 @@ def get_azure_client():
         api_version=AZURE_API_VERSION,
     )
 
-# -------------------------
-# PROMPTS
-# -------------------------
+# =========================
+# GPT PROMPTS
+# =========================
 SYSTEM_PROMPT = """You are a helpful math/physics tutor.
-
-Return a concise, correct solution as STRICT JSON ONLY (no prose outside JSON).
-Use LaTeX for math (KaTeX-compatible). Keep steps short (1–2 lines each).
-
-SCHEMA:
-{
-  "problem": "<original problem text>",
-  "topic": "algebra|calculus|trig|mechanics|... (one word if possible)",
-  "steps": [
-    {"title": "Given", "latex": "..."},
-    {"title": "Rule", "latex": "..."},
-    {"title": "Apply", "latex": "..."}
-  ],
-  "final_answer_latex": "...",
-
-  "tikz": {
-    "can_draw": true|false,
-    "reason": "why a small diagram helps (1 sentence)",
-    "source": "\\n\\begin{tikzpicture}[scale=1]\\n ... \\n\\end{tikzpicture}\\n"
-  }
-}
-
-RULES:
-- Output must be valid JSON (no trailing commas).
-- Escape backslashes correctly in LaTeX.
-- If a diagram is not meaningful, set can_draw=false and fill "reason".
-- Prefer small, quick steps (<= 6).
-- For lines intended for the Matplotlib PNG, prefer mathtext-safe LaTeX:
-  avoid aligned/align/eqnarray; avoid \\text{...} (use \\mathrm{...});
-  prefer \\Rightarrow over \\implies.
-"""
+Return STRICT JSON ONLY (no prose).
+Use KaTeX-compatible LaTeX. Use ≤6 steps.
+For Matplotlib rendering, prefer mathtext-safe LaTeX (avoid \\text{}, aligned, eqnarray; prefer \\mathrm{})."""
 
 USER_PROMPT_TEMPLATE = """Problem:
 {problem}
-
 Constraints:
-- Format JSON exactly as described. No extra keys.
-- Use at most 6 steps.
-- Keep equations simple and single-line when possible (PNG uses Matplotlib mathtext).
+- JSON only, ≤6 steps
+- Prefer mathtext-safe LaTeX
 """
 
-# -------------------------
+# =========================
 # GPT CALL
-# -------------------------
+# =========================
 def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
     client = get_azure_client()
-
     resp = client.chat.completions.create(
         model=AZURE_DEPLOYMENT,
         temperature=0.2,
@@ -118,34 +88,26 @@ def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
         response_format={"type": "json_object"},
     )
     content = resp.choices[0].message.content
-
-    # Robust JSON parsing (fallback)
     try:
-        data = json.loads(content)
+        return json.loads(content)
     except json.JSONDecodeError:
         match = re.search(r"\{[\s\S]*\}\s*$", content)
         if not match:
-            raise ValueError("Model did not return JSON.")
-        data = json.loads(match.group(0))
-    return data
+            raise ValueError("Model returned invalid JSON")
+        return json.loads(match.group(0))
 
-# -------------------------
-# HTML GENERATOR (KaTeX)
-# -------------------------
+# =========================
+# HTML BUILDER (KaTeX Animated)
+# =========================
 def build_animated_katex_html(payload: Dict[str, Any]) -> str:
-    """
-    KaTeX-only animated stepper (TikZ removed). Use alongside a Matplotlib PNG for visuals.
-    """
     safe_json = json.dumps(payload, ensure_ascii=False)
-
-    html = f"""<!doctype html>
-<html lang="en">
+    return f"""<!doctype html>
+<html lang='en'>
 <head>
-<meta charset="utf-8">
-<title>Solution — Animated Steps</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<meta charset='utf-8'>
+<title>Solution Steps</title>
+<link rel='stylesheet' href='https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css'>
+<script defer src='https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js'></script>
 <style>
 :root{{ --bg:#0d1117; --card:#141b23; --text:#eaf2f8; --muted:#9fb6c2; --stroke:#223140; --accent:#7ee787; }}
 *{{box-sizing:border-box}}
@@ -173,176 +135,154 @@ small, .muted{{color:var(--muted)}}
 <body>
 <header>
   <h1>Solution — Animated Steps</h1>
-  <div class="muted" id="meta"></div>
+  <div class='muted' id='meta'></div>
 </header>
-
-<div class="wrap">
-  <section class="panel">
-    <div class="controls">
-      <button id="play" class="btn accent">▶ Play</button>
-      <button id="step" class="btn">→ Step</button>
-      <button id="pause" class="btn">⏸ Pause</button>
-      <button id="reset" class="btn">↺ Reset</button>
+<div class='wrap'>
+  <section class='panel'>
+    <div class='controls'>
+      <button id='play' class='btn accent'>▶ Play</button>
+      <button id='step' class='btn'>→ Step</button>
+      <button id='pause' class='btn'>⏸ Pause</button>
+      <button id='reset' class='btn'>↺ Reset</button>
     </div>
-    <div class="progress"><div id="bar"></div></div>
-    <ol id="steps" class="steps"></ol>
-    <div class="answer" id="answer"></div>
+    <div class='progress'><div id='bar'></div></div>
+    <ol id='steps' class='steps'></ol>
+    <div class='answer' id='answer'></div>
   </section>
 </div>
-
 <script>
 const payload = {safe_json};
-
-function katexRender(el, tex, display=true) {{
-  try {{ katex.render(tex, el, {{throwOnError:false, displayMode:display}}); }}
-  catch(e) {{ el.textContent = tex; }}
-}}
-
-const list = document.getElementById('steps');
-const bar  = document.getElementById('bar');
-const ans  = document.getElementById('answer');
-const meta = document.getElementById('meta');
-
-meta.textContent = "Topic: " + (payload.topic||"") + "   •   Problem: " + (payload.problem||"");
-
+function katexRender(el, tex, display=true){
+  try{ katex.render(tex, el, {throwOnError:false, displayMode:display}); }catch(e){ el.textContent = tex; }
+}
+const list=document.getElementById('steps');
+const bar=document.getElementById('bar');
+const ans=document.getElementById('answer');
+const meta=document.getElementById('meta');
+meta.textContent = "Topic: "+(payload.topic||"")+"   •   Problem: "+(payload.problem||"");
 let i=-1, playing=false;
-
-function build() {{
-  list.innerHTML = "";
-  ans.innerHTML = "";
-  (payload.steps||[]).forEach((s, idx) => {{
-    const li = document.createElement('li');
-    li.className = 'step';
-    li.innerHTML = `<h2>${{s.title||('Step '+(idx+1))}}</h2><div class="math"></div>`;
+function build(){
+  list.innerHTML=""; ans.innerHTML="";
+  (payload.steps||[]).forEach((s,idx)=>{
+    const li=document.createElement('li');
+    li.className='step';
+    li.innerHTML=`<h2>${s.title||('Step '+(idx+1))}</h2><div class='math'></div>`;
     list.appendChild(li);
-    s._node = li.querySelector('.math');
-  }});
+    s._node=li.querySelector('.math');
+  });
   i=-1; updateBar();
   ans.innerHTML = "<small>Final answer</small><div id='ansmath'></div>";
-}}
-
-function updateBar() {{
-  const pct = Math.max(0, (i+1)/((payload.steps||[]).length)) * 100;
-  bar.style.width = pct + '%';
-}}
-
-function next() {{
-  if (!payload.steps || i >= payload.steps.length-1) return;
-  i++;
-  const s = payload.steps[i];
-  s._node.parentElement.classList.add('show');
-  katexRender(s._node, s.latex || "", true);
-  updateBar();
-  if (i === payload.steps.length-1) {{
-    const el = document.getElementById('ansmath');
-    katexRender(el, payload.final_answer_latex || "", true);
-  }}
-}}
-
-function playLoop() {{
-  if (!playing) return;
-  if (i < (payload.steps||[]).length-1) {{
-    next(); setTimeout(playLoop, 700);
-  }} else {{
-    playing = false;
-  }}
-}}
-
-document.getElementById('play').onclick  = () => {{ if (!playing) {{ playing=true; playLoop(); }} }};
-document.getElementById('step').onclick  = () => {{ playing=false; next(); }};
-document.getElementById('pause').onclick = () => {{ playing=false; }};
-document.getElementById('reset').onclick = () => {{ playing=false; build(); }};
-
+}
+function updateBar(){ bar.style.width = Math.max(0,(i+1)/((payload.steps||[]).length))*100+'%'; }
+function next(){
+  if(!payload.steps||i>=(payload.steps.length-1)) return;
+  i++; const s=payload.steps[i]; s._node.parentElement.classList.add('show');
+  katexRender(s._node, s.latex||"", true); updateBar();
+  if(i===(payload.steps.length-1)) katexRender(document.getElementById('ansmath'), payload.final_answer_latex||"", true);
+}
+function playLoop(){ if(!playing) return; if(i<(payload.steps||[]).length-1){ next(); setTimeout(playLoop,700);} else {playing=false;} }
+play.onclick=()=>{ if(!playing){ playing=true; playLoop(); } };
+step.onclick=()=>{ playing=false; next(); };
+pause.onclick=()=>{ playing=false; };
+reset.onclick=()=>{ playing=false; build(); };
 build();
 </script>
 </body>
-</html>
-"""
-    return html
+</html>"""
 
-# -------------------------
-# MATPLOTLIB PNG (single image)
-# -------------------------
-def build_steps_png(payload: Dict[str, Any], outfile: Path) -> Path:
-    """Render a single PNG showing the problem, revealed steps, and final answer.
-    Uses matplotlib's mathtext; includes a LaTeX sanitizer + fallback to plain text.
-    """
-    import io
+# =========================
+# GRAPH PARSING & PLOTTING
+# =========================
+
+def guess_equation(text: str) -> Optional[str]:
+    """Best-effort grab of 'y = ...' (or f(x)=...) from free text."""
+    if not text:
+        return None
+    m = re.search(r"y\s*=\s*([^\n;]+)", text, flags=re.IGNORECASE)
+    if m:
+        rhs = m.group(1).strip()
+        return f"y = {rhs}"
+    m = re.search(r"f\s*\(\s*x\s*\)\s*=\s*([^\n;]+)", text, flags=re.IGNORECASE)
+    if m:
+        rhs = m.group(1).strip()
+        return f"y = {rhs}"
+    # Last resort: a bare expression containing 'x' (e.g., x^2 - 1)
+    m = re.search(r"(?<![A-Za-z0-9_])(x[^\n;]+)", text)
+    if m:
+        cand = m.group(1).strip()
+        return f"y = {cand}"
+    return None
+
+
+def _to_numpy_expr(expr: str) -> str:
+    """Convert a math string into a numpy-evaluable Python expression."""
+    s = expr.strip()
+    # take RHS if 'y = ...'
+    if re.match(r"^y\s*=", s, flags=re.IGNORECASE):
+        s = s.split("=", 1)[1]
+    # basic normalizations
+    s = s.replace("^", "**")
+    s = s.replace("ln", "log")
+    # implicit multiplication: 2x -> 2*x, 2(x+1)->2*(x+1)
+    s = re.sub(r"(?<=\d)\s*(?=x)", "*", s)
+    s = re.sub(r"(?<=\d)\s*\(", "*(", s)
+    # Allow absolute value via abs()
+    s = s.replace("|x|", "abs(x)")
+    return s
+
+
+def plot_equation_png(equation: str, outfile: Path, x_min: float = -5.0, x_max: float = 5.0, points: int = 1000) -> Path:
+    import numpy as np
     import matplotlib.pyplot as plt
-    import re as _re
 
-    def _sanitize_for_mathtext(tex: str) -> str:
-        if not isinstance(tex, str):
-            return ""
-        s = tex.strip()
-        # strip surrounding $...$ if any
-        if s.startswith("$") and s.endswith("$"):
-            s = s[1:-1].strip()
-        # remove unsupported environments
-        s = _re.sub(r"\\begin\{aligned\}|\\end\{aligned\}", "", s)
-        s = _re.sub(r"\\begin\{align\*?\}|\\end\{align\*?\}", "", s)
-        s = _re.sub(r"\\begin\{eqnarray\*?\}|\\end\{eqnarray\*?\}", "", s)
-        # latex line breaks → real newlines
-        s = s.replace(r"\\", "\n")
-        # \text{...} → \mathrm{...}
-        s = _re.sub(r"\\text\{([^}]*)\}", r"\\mathrm{\1}", s)
-        # common aliases not supported by mathtext
-        s = s.replace(r"\implies", r"\Rightarrow")
-        s = s.replace(r"\iff", r"\Leftrightarrow")
-        s = s.replace(r"\land", r"\wedge").replace(r"\lor", r"\vee")
-        s = s.replace(r"\operatorname{", r"\mathrm{")
-        # guard against stray ^ or _ at end
-        s = _re.sub(r"\^(\s|$)", "", s)
-        s = _re.sub(r"_(\s|$)", "", s)
-        return s
+    if x_max <= x_min:
+        raise ValueError("x_max must be greater than x_min")
+    expr = _to_numpy_expr(equation)
 
-    def _draw_math_or_plain(ax, x, y, s, **kwargs):
-        tex = _sanitize_for_mathtext(s)
-        try:
-            ax.text(x, y, f"$ {tex} $", **kwargs)
-        except Exception:
-            ax.text(x, y, tex, **kwargs)
+    # Safe eval environment
+    x = np.linspace(x_min, x_max, int(points))
+    env = {
+        "x": x,
+        "pi": np.pi,
+        "e": np.e,
+        "sin": np.sin,
+        "cos": np.cos,
+        "tan": np.tan,
+        "sinh": np.sinh,
+        "cosh": np.cosh,
+        "tanh": np.tanh,
+        "arcsin": np.arcsin,
+        "arccos": np.arccos,
+        "arctan": np.arctan,
+        "exp": np.exp,
+        "log": np.log,
+        "sqrt": np.sqrt,
+        "abs": np.abs,
+    }
 
-    steps: List[Dict[str, str]] = payload.get("steps") or []
-    problem = payload.get("problem") or "Problem"
-    final_ans = payload.get("final_answer_latex") or ""
+    try:
+        y = eval(expr, {"__builtins__": {}}, env)
+    except Exception as e:
+        raise ValueError(f"Could not parse/evaluate the equation: {equation}\nDetails: {e}")
 
-    # Render all steps on one static canvas
-    fig = plt.figure(figsize=(8, 10), dpi=150)
-    ax = fig.add_axes([0, 0, 1, 1])
-    ax.axis('off')
+    if hasattr(y, "shape") and y.shape == x.shape:
+        fig, ax = plt.subplots(figsize=(7, 5), dpi=150)
+        ax.plot(x, y)
+        ax.axhline(0, lw=1)
+        ax.axvline(0, lw=1)
+        ax.grid(True)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_title(equation)
+        fig.savefig(outfile, bbox_inches="tight")
+        plt.close(fig)
+        return outfile
+    else:
+        raise ValueError("Evaluated expression did not produce a y(x) array.")
 
-    y = 0.96
-    ax.text(0.05, y, "Solution Overview", fontsize=16, weight='bold', transform=ax.transAxes)
-    y -= 0.06
-    ax.text(0.05, y, f"Problem: {problem}", fontsize=11, transform=ax.transAxes, wrap=True)
-    y -= 0.04
-    ax.plot([0.05, 0.95], [y, y], lw=1.2)
-    y -= 0.04
-
-    for i, step in enumerate(steps, start=1):
-        title = step.get('title') or f"Step {i}"
-        latex = step.get('latex') or ""
-        ax.text(0.05, y, f"{title}", fontsize=12, weight='bold', transform=ax.transAxes)
-        y -= 0.045
-        _draw_math_or_plain(ax, 0.08, y, latex, fontsize=12, transform=ax.transAxes)
-        y -= 0.11
-
-    if final_ans:
-        y -= 0.02
-        ax.plot([0.05, 0.95], [y, y], lw=1.2)
-        y -= 0.06
-        ax.text(0.05, y, "Final Answer:", fontsize=13, weight='bold', transform=ax.transAxes)
-        y -= 0.055
-        _draw_math_or_plain(ax, 0.08, y, final_ans, fontsize=13, transform=ax.transAxes)
-
-    fig.savefig(outfile, format="png", bbox_inches="tight")
-    plt.close(fig)
-    return outfile
-
-# -------------------------
-# UTIL
-# -------------------------
+# =========================
+# UTILS
+# =========================
 def save_html(html: str, filename: str) -> Path:
     out = Path("animated_exports")
     out.mkdir(exist_ok=True)
@@ -350,14 +290,12 @@ def save_html(html: str, filename: str) -> Path:
     p.write_text(html, encoding="utf-8")
     return p
 
-
 def make_slug(s: str, n: int = 36) -> str:
-    s = re.sub(r"[^a-zA-Z0-9]+", "-", s.strip()).strip("-").lower()
-    return (s[:n] or "solution")
+    return re.sub(r"[^a-zA-Z0-9]+", "-", s.strip()).strip("-").lower()[:n]
 
-# -------------------------
-# SIDEBAR / INPUTS
-# -------------------------
+# =========================
+# SIDEBAR
+# =========================
 with st.sidebar:
     st.header("Input")
     default_example = "Sketch y = x^2 - 1 and find its vertex and y-intercept."
@@ -370,10 +308,28 @@ with st.sidebar:
         if up:
             problem_text = up.read().decode("utf-8")
 
-# -------------------------
-# MAIN ACTION
-# -------------------------
-if st.button("🚀 Solve & Generate (HTML + PNG)", use_container_width=True):
+    st.divider()
+    st.subheader("Optional: Graph (PNG)")
+    want_graph = st.checkbox("Create graph (y = f(x)) as PNG", value=False)
+    eq_guess = guess_equation(problem_text) or ""
+    equation_to_plot = ""
+    x_min = -5.0
+    x_max = 5.0
+    points = 1000
+    if want_graph:
+        equation_to_plot = st.text_input("Equation (e.g., y = x^2 - 1)", value=eq_guess)
+        cols = st.columns(3)
+        with cols[0]:
+            x_min = st.number_input("x_min", value=-5.0)
+        with cols[1]:
+            x_max = st.number_input("x_max", value=5.0)
+        with cols[2]:
+            points = st.number_input("points", min_value=100, max_value=5000, value=1000, step=100)
+
+# =========================
+# MAIN
+# =========================
+if st.button("🚀 Solve & Generate (HTML + optional Graph PNG)", use_container_width=True):
     if not problem_text.strip():
         st.error("Please provide a problem.")
         st.stop()
@@ -387,48 +343,31 @@ if st.button("🚀 Solve & Generate (HTML + PNG)", use_container_width=True):
 
     st.success("Got result from GPT!")
 
-    # ---------- Build HTML (KaTeX)
-    with st.spinner("Building animated KaTeX HTML..."):
+    with st.spinner("Building HTML..."):
         html = build_animated_katex_html(result)
         stem = make_slug(result.get("topic") or "math") + "-" + str(int(time.time()))
         html_filename = f"{stem}.html"
         html_path = save_html(html, html_filename)
 
-    st.success(f"HTML written: {html_path}")
-
     with open(html_path, "r", encoding="utf-8") as f:
         html_str = f.read()
-
-    # Embedded preview (KaTeX steps)
     st.components.v1.html(html_str, height=640, scrolling=True)
+    st.download_button("⬇️ Download HTML", data=html_str, file_name=html_filename, mime="text/html", use_container_width=True)
 
-    st.download_button(
-        "⬇️ Download HTML",
-        data=html_str,
-        file_name=html_filename,
-        mime="text/html",
-        use_container_width=True,
-    )
+    if want_graph:
+        if not equation_to_plot.strip():
+            st.warning("Graphing enabled, but no equation provided. Please enter something like 'y = x^2 - 1'.")
+        else:
+            with st.spinner("Plotting equation as PNG..."):
+                out_dir = Path("animated_exports"); out_dir.mkdir(exist_ok=True)
+                png_path = out_dir / (stem + "-graph.png")
+                try:
+                    plot_equation_png(equation_to_plot, png_path, float(x_min), float(x_max), int(points))
+                    st.image(str(png_path), caption=f"Graph: {equation_to_plot}", use_container_width=True)
+                    st.download_button("⬇️ Download Graph PNG", data=png_path.read_bytes(), file_name=png_path.name, mime="image/png", use_container_width=True)
+                except Exception as e:
+                    st.warning("Could not plot the equation. See details below.")
+                    st.exception(e)
 
-    # ---------- Build Matplotlib PNG
-    with st.spinner("Rendering steps PNG with Matplotlib..."):
-        out_dir = Path("animated_exports")
-        out_dir.mkdir(exist_ok=True)
-        png_path = out_dir / (stem + ".png")
-        try:
-            build_steps_png(result, png_path)
-            st.image(str(png_path), caption="Steps PNG (Matplotlib)", use_container_width=True)
-            st.download_button(
-                "⬇️ Download PNG",
-                data=png_path.read_bytes(),
-                file_name=png_path.name,
-                mime="image/png",
-                use_container_width=True,
-            )
-        except Exception as e:
-            st.warning("Could not render PNG. Showing error below.")
-            st.exception(e)
-
-    # Optional: Show raw JSON
     with st.expander("Show raw JSON from GPT"):
         st.code(json.dumps(result, indent=2, ensure_ascii=False), language="json")
