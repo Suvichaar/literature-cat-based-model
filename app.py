@@ -3,7 +3,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import streamlit as st
 
@@ -13,26 +13,23 @@ try:
 except Exception:
     AzureOpenAI = None
 
-
-# =========================
+# -------------------------
 # UI CONFIG
-# =========================
+# -------------------------
 st.set_page_config(
-    page_title="Math → Animated Steps (KaTeX) + TikZ",
+    page_title="Math → Animated Steps (KaTeX) + Matplotlib GIF",
     page_icon="🧮",
     layout="wide",
 )
 
-st.title("🧮 Math → Animated HTML (KaTeX) + ✏️ TikZ (if helpful)")
+st.title("🧮 Math → Animated HTML (KaTeX) + 🖼️ Matplotlib GIF")
 st.caption(
-    "Type or upload a problem → GPT returns concise LaTeX steps and (optionally) a TikZ diagram → "
-    "we generate an animated HTML you can preview, download, or open in a new tab to see TikZ."
+    "Type or upload a problem → GPT returns concise LaTeX steps → we build (a) an animated KaTeX HTML and (b) a Matplotlib GIF of the steps."
 )
 
-
-# =========================
+# -------------------------
 # READ SECRETS / CONFIG
-# =========================
+# -------------------------
 def get_secret(key: str, default=None):
     try:
         return st.secrets[key]
@@ -44,10 +41,9 @@ AZURE_ENDPOINT     = get_secret("AZURE_ENDPOINT")
 AZURE_DEPLOYMENT   = get_secret("AZURE_DEPLOYMENT")          # e.g., "gpt-5-chat"
 AZURE_API_VERSION  = get_secret("AZURE_API_VERSION", "2025-01-01-preview")
 
-
-# =========================
+# -------------------------
 # AZURE CLIENT
-# =========================
+# -------------------------
 def get_azure_client():
     if AzureOpenAI is None:
         st.error("AzureOpenAI SDK not installed. Run:  pip install openai>=1.13.3")
@@ -61,10 +57,9 @@ def get_azure_client():
         api_version=AZURE_API_VERSION,
     )
 
-
-# =========================
+# -------------------------
 # PROMPTS
-# =========================
+# -------------------------
 SYSTEM_PROMPT = """You are a helpful math/physics tutor.
 
 Return a concise, correct solution as STRICT JSON ONLY (no prose outside JSON).
@@ -92,14 +87,7 @@ RULES:
 - Output must be valid JSON (no trailing commas).
 - Escape backslashes correctly in LaTeX.
 - If a diagram is not meaningful, set can_draw=false and fill "reason".
-- TikZ MUST compile standalone when wrapped in:
-    \\documentclass[tikz]{standalone}
-    \\usepackage{pgfplots}
-    \\pgfplotsset{compat=1.18}
-    \\begin{document}
-    <source>
-    \\end{document}
-- Prefer small, quick-to-compile diagrams (axes + 1–2 elements).
+- Prefer small, quick steps (<= 6).
 """
 
 USER_PROMPT_TEMPLATE = """Problem:
@@ -110,13 +98,11 @@ Constraints:
 - Use at most 6 steps.
 - Prefer aligned equations where helpful:
   "\\begin{{aligned}} ... \\end{{aligned}}"
-- If including TikZ, keep it minimal (axes, labeled points/curve).
 """
 
-
-# =========================
+# -------------------------
 # GPT CALL
-# =========================
+# -------------------------
 def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
     client = get_azure_client()
 
@@ -131,7 +117,7 @@ def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
     )
     content = resp.choices[0].message.content
 
-    # Robust JSON parsing (just in case)
+    # Robust JSON parsing (fallback)
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
@@ -141,47 +127,23 @@ def call_gpt_solve(problem_text: str) -> Dict[str, Any]:
         data = json.loads(match.group(0))
     return data
 
-
-# =========================
-# HTML GENERATOR (KaTeX + Animation + TikZ)
-# =========================
+# -------------------------
+# HTML GENERATOR (KaTeX)
+# -------------------------
 def build_animated_katex_html(payload: Dict[str, Any]) -> str:
     """
-    Embeds:
-      - KaTeX for math steps
-      - tikzjax for optional TikZ diagram (payload['tikz'])
+    KaTeX-only animated stepper (TikZ removed). Use alongside a Matplotlib GIF for visuals.
     """
     safe_json = json.dumps(payload, ensure_ascii=False)
-    tikz = (payload.get("tikz") or {})
-    tikz_can = bool(tikz.get("can_draw"))
-    tikz_src = tikz.get("source") or ""
-
-    tikz_block = ""
-    if tikz_can and tikz_src.strip():
-        tikz_block = f"""
-<section class="panel">
-  <h2>TikZ Diagram</h2>
-  <div class="muted">{(tikz.get("reason") or "").strip()}</div>
-  <div class="tikz-wrap">
-    <script type="text/tikz">
-{tikz_src}
-    </script>
-  </div>
-</section>
-"""
 
     html = f"""<!doctype html>
-<html lang="en">
+<html lang=\"en\">
 <head>
-<meta charset="utf-8">
+<meta charset=\"utf-8\">
 <title>Solution — Animated Steps</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-
-<!-- tikzjax: client-side TikZ→SVG rendering -->
-<script defer src="https://tikzjax.com/v1/tikzjax.js"></script>
-
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+<link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css\">
+<script defer src=\"https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js\"></script>
 <style>
 :root{{ --bg:#0d1117; --card:#141b23; --text:#eaf2f8; --muted:#9fb6c2; --stroke:#223140; --accent:#7ee787; }}
 *{{box-sizing:border-box}}
@@ -204,29 +166,26 @@ small, .muted{{color:var(--muted)}}
 .progress{{height:6px;border-radius:999px;background:#0e1520;border:1px solid var(--stroke);overflow:hidden;margin:10px 0 0}}
 .progress>div{{height:100%;width:0%;background:var(--accent);transition:width .3s ease}}
 .answer{{background:#0c151f;border:1px dashed var(--stroke);border-radius:12px;padding:12px;margin-top:14px}}
-.tikz-wrap svg{{width:100%; height:auto; background:#0b131d; border:1px solid var(--stroke); border-radius:12px; padding:8px}}
 </style>
 </head>
 <body>
 <header>
   <h1>Solution — Animated Steps</h1>
-  <div class="muted" id="meta"></div>
+  <div class=\"muted\" id=\"meta\"></div>
 </header>
 
-<div class="wrap">
-  <section class="panel">
-    <div class="controls">
-      <button id="play" class="btn accent">▶ Play</button>
-      <button id="step" class="btn">→ Step</button>
-      <button id="pause" class="btn">⏸ Pause</button>
-      <button id="reset" class="btn">↺ Reset</button>
+<div class=\"wrap\">
+  <section class=\"panel\">
+    <div class=\"controls\">
+      <button id=\"play\" class=\"btn accent\">▶ Play</button>
+      <button id=\"step\" class=\"btn\">→ Step</button>
+      <button id=\"pause\" class=\"btn\">⏸ Pause</button>
+      <button id=\"reset\" class=\"btn\">↺ Reset</button>
     </div>
-    <div class="progress"><div id="bar"></div></div>
-    <ol id="steps" class="steps"></ol>
-    <div class="answer" id="answer"></div>
+    <div class=\"progress\"><div id=\"bar\"></div></div>
+    <ol id=\"steps\" class=\"steps\"></ol>
+    <div class=\"answer\" id=\"answer\"></div>
   </section>
-
-  {tikz_block}
 </div>
 
 <script>
@@ -301,10 +260,75 @@ build();
 """
     return html
 
+# -------------------------
+# MATPLOTLIB GIF (steps reveal)
+# -------------------------
+def build_steps_gif(payload: Dict[str, Any], outfile: Path, fps: int = 2) -> Path:
+    """Create a simple GIF using matplotlib where each frame reveals one more step.
+    Uses matplotlib's mathtext to render LaTeX-style expressions.
+    """
+    import io
+    from PIL import Image
+    import imageio.v2 as imageio
+    import matplotlib.pyplot as plt
 
-# =========================
+    steps: List[Dict[str, str]] = payload.get("steps") or []
+    problem = payload.get("problem") or "Problem"
+    final_ans = payload.get("final_answer_latex") or ""
+
+    frames = []
+    total = len(steps)
+
+    for k in range(total + 1):  # +1 to include final-answer frame
+        fig = plt.figure(figsize=(8, 6), dpi=150)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.axis('off')
+
+        y = 0.95
+        ax.text(0.05, y, "Solution Steps", fontsize=14, weight='bold', transform=ax.transAxes)
+        y -= 0.06
+        ax.text(0.05, y, f"Problem: {problem}", fontsize=10, transform=ax.transAxes, wrap=True)
+        y -= 0.06
+        ax.text(0.05, y, f"Showing {min(k, total)} / {total} step(s)", fontsize=9, transform=ax.transAxes)
+        y -= 0.04
+        ax.plot([0.05, 0.95], [y, y], lw=1)
+        y -= 0.04
+
+        # Render revealed steps
+        for i in range(min(k, total)):
+            step = steps[i]
+            title = step.get('title') or f"Step {i+1}"
+            latex = step.get('latex') or ""
+            ax.text(0.05, y, f"{title}", fontsize=11, weight='bold', transform=ax.transAxes)
+            y -= 0.05
+            # mathtext; use raw string-like $...$
+            ax.text(0.08, y, f"$ {latex} $", fontsize=11, transform=ax.transAxes, wrap=True)
+            y -= 0.09
+
+        # Final answer on last frame
+        if k == total and final_ans:
+            y -= 0.02
+            ax.plot([0.05, 0.95], [y, y], lw=1)
+            y -= 0.06
+            ax.text(0.05, y, "Final Answer:", fontsize=12, weight='bold', transform=ax.transAxes)
+            y -= 0.06
+            ax.text(0.08, y, f"$ {final_ans} $", fontsize=12, transform=ax.transAxes, wrap=True)
+
+        # Convert figure to PIL Image
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight')
+        plt.close(fig)
+        buf.seek(0)
+        frames.append(Image.open(buf).convert('P', palette=Image.ADAPTIVE))
+
+    # Save GIF
+    duration = 1.0 / max(1, fps)
+    imageio.mimsave(outfile, frames, duration=duration)
+    return outfile
+
+# -------------------------
 # UTIL
-# =========================
+# -------------------------
 def save_html(html: str, filename: str) -> Path:
     out = Path("animated_exports")
     out.mkdir(exist_ok=True)
@@ -317,10 +341,9 @@ def make_slug(s: str, n: int = 36) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", s.strip()).strip("-").lower()
     return (s[:n] or "solution")
 
-
-# =========================
+# -------------------------
 # SIDEBAR / INPUTS
-# =========================
+# -------------------------
 with st.sidebar:
     st.header("Input")
     default_example = "Sketch y = x^2 - 1 and find its vertex and y-intercept."
@@ -333,16 +356,15 @@ with st.sidebar:
         if up:
             problem_text = up.read().decode("utf-8")
 
-
-# =========================
+# -------------------------
 # MAIN ACTION
-# =========================
-if st.button("🚀 Solve & Generate Animated HTML", use_container_width=True):
+# -------------------------
+if st.button("🚀 Solve & Generate (HTML + GIF)", use_container_width=True):
     if not problem_text.strip():
         st.error("Please provide a problem.")
         st.stop()
 
-    with st.spinner("Asking GPT for LaTeX steps + (optional) TikZ..."):
+    with st.spinner("Asking GPT for LaTeX steps..."):
         try:
             result = call_gpt_solve(problem_text)
         except Exception as e:
@@ -351,53 +373,49 @@ if st.button("🚀 Solve & Generate Animated HTML", use_container_width=True):
 
     st.success("Got result from GPT!")
 
-    with st.spinner("Building animated KaTeX + TikZ HTML..."):
+    # ---------- Build HTML (KaTeX)
+    with st.spinner("Building animated KaTeX HTML..."):
         html = build_animated_katex_html(result)
         stem = make_slug(result.get("topic") or "math") + "-" + str(int(time.time()))
-        filename = f"{stem}.html"
-        path = save_html(html, filename)
+        html_filename = f"{stem}.html"
+        html_path = save_html(html, html_filename)
 
-    st.success(f"HTML written: {path}")
+    st.success(f"HTML written: {html_path}")
 
-    # Preview HTML (TikZ may not render inside Streamlit iframe)
-    with open(path, "r", encoding="utf-8") as f:
+    with open(html_path, "r", encoding="utf-8") as f:
         html_str = f.read()
 
-    # --- Button to open HTML in a NEW TAB (outside sandbox) so TikZ renders ---
-    import base64
-
-    def open_in_new_tab_button(label: str, full_html: str):
-        b64 = base64.b64encode(full_html.encode("utf-8")).decode("ascii")
-        data_url = f"data:text/html;base64,{b64}"
-        st.markdown(
-            f'<a href="{data_url}" target="_blank" rel="noopener" '
-            f'style="display:inline-block;padding:10px 14px;border:1px solid #334;'
-            f'border-radius:8px;text-decoration:none;background:#101824;color:#eaf2f8;'
-            f'font-weight:600;margin-bottom:8px;">🔎 Open TikZ Preview (new tab)</a>',
-            unsafe_allow_html=True,
-        )
-
-    if '<script type="text/tikz">' in html_str:
-        st.info(
-            "TikZ uses a WebWorker/WASM which may be blocked in Streamlit's embedded preview. "
-            "Click the button below to open the full page in a new tab where TikZ will render."
-        )
-        open_in_new_tab_button("🔎 Open TikZ Preview (new tab)", html_str)
-
-        # Optional: show TikZ source for copy/paste
-        m = re.search(r'<script type="text/tikz">\s*([\s\S]*?)\s*</script>', html_str)
-        if m:
-            st.caption("TikZ source returned:")
-            st.code(m.group(1).strip(), language="latex")
-
-    # Embedded preview (steps/answer show; TikZ may not, depending on sandbox)
+    # Embedded preview (KaTeX steps)
     st.components.v1.html(html_str, height=640, scrolling=True)
 
-    # Download button (always works)
     st.download_button(
         "⬇️ Download HTML",
         data=html_str,
-        file_name=filename,
+        file_name=html_filename,
         mime="text/html",
         use_container_width=True,
     )
+
+    # ---------- Build Matplotlib GIF (no TikZ)
+    with st.spinner("Rendering steps GIF with Matplotlib..."):
+        out_dir = Path("animated_exports")
+        out_dir.mkdir(exist_ok=True)
+        gif_path = out_dir / (stem + ".gif")
+        try:
+            build_steps_gif(result, gif_path, fps=2)
+            st.image(str(gif_path), caption="Steps GIF (Matplotlib)", use_container_width=True)
+            # Provide download
+            st.download_button(
+                "⬇️ Download GIF",
+                data=gif_path.read_bytes(),
+                file_name=gif_path.name,
+                mime="image/gif",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning("Could not render GIF. Showing error below.")
+            st.exception(e)
+
+    # Optional: Show raw JSON
+    with st.expander("Show raw JSON from GPT"):
+        st.code(json.dumps(result, indent=2, ensure_ascii=False), language="json")
